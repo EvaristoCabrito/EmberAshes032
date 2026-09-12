@@ -18,7 +18,7 @@ import { MISSIONS, TILE_CHAR, WORLD_LOCATIONS } from "./data";
 import SLOT_CONFIG from "./map-slots.json";
 import ORDER_CONFIG from "./map-order.json";
 import LOCATION_ORDER_CONFIG from "./location-order.json";
-import type { DecorationPlacement, Mission, Spawn, TerrainId, WinCondition, WorldLocation } from "./types";
+import type { DecorationPlacement, DialogTree, Mission, Spawn, TerrainId, WinCondition, WorldLocation } from "./types";
 
 /** A spawn as edited in the Map Editor — the real Spawn shape plus a per-spawn test
  * level, which only exists for "Testar" (balance testing). It never leaves the editor:
@@ -74,6 +74,12 @@ export interface MapDraft {
   /** Wild things on no side. Optional: map files saved before neutrals existed have no such
    * key, and every reader has to treat a missing list as an empty one. */
   neutralSpawns?: DraftSpawn[];
+  /** See Mission.introDialog/introDialogEnabled — shown once, before the player can act. */
+  introDialog?: DialogTree;
+  introDialogEnabled?: boolean;
+  /** See Mission.outroDialog/outroDialogEnabled — shown once victory is confirmed. */
+  outroDialog?: DialogTree;
+  outroDialogEnabled?: boolean;
 }
 
 /** One saved map file. `serial` matches the number in the file name. */
@@ -116,6 +122,10 @@ export function draftToMission(d: MapDraft): Mission {
     hub: d.hub || undefined,
     autoTactics: d.autoTactics ? undefined : false,
     fog: d.fog ? true : undefined,
+    introDialog: d.introDialog,
+    introDialogEnabled: d.introDialogEnabled,
+    outroDialog: d.outroDialog,
+    outroDialogEnabled: d.outroDialogEnabled,
   };
 }
 

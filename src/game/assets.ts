@@ -55,8 +55,29 @@ export function tileVariantName(id: TerrainId, variant: number): string {
 export function tileVariantSrc(id: TerrainId, variant: number): string {
   return `/game/tiles/${tileVariantName(id, variant)}.png?v=55`;
 }
+/** Framed portrait art for the sprites that have one; every other sprite falls back to its
+ * own first battle-frame, unframed. */
+const HERO_PORTRAIT: Partial<Record<string, string>> = {
+  kael: "/game/portraits/kael.png?v=2",
+  nira: "/game/portraits/nira.png",
+  voss: "/game/portraits/voss.png",
+  salazar: "/game/portraits/salazar.png",
+  malrec: "/game/portraits/malrec.png",
+  aldric: "/game/portraits/aldric.png",
+  defaultLancer: "/game/portraits/aldric.png",
+  sandoval: "/game/portraits/sandoval-001.jpg?v=1",
+  conjurer: "/game/portraits/conjurer-002.png?v=2",
+};
+
+/** The one place the portrait-or-sprite-frame fallback lives — used by the unit inspect
+ * popup, the footer portrait button, and DialogOverlay. */
+export function portraitFor(sprite: SpriteId): { src: string; framed: boolean } {
+  const framed = HERO_PORTRAIT[sprite];
+  return framed ? { src: framed, framed: true } : { src: `/game/sprites/${sprite}/1.png`, framed: false };
+}
+
 const TILES = Object.keys(TILE_VARIANT_COUNT) as TerrainId[];
-const SPRITES: SpriteId[] = ["kael", "nira", "voss", "salazar", "malrec", "aldric", "defaultLancer", "soldier", "brigand", "captain", "sorcerer", "horror", "Asherah", "pikeman", "wardog", "troll", "morvenian-wolf", "butcher", "birolho", "familiar", "swamp-blue-calf", "ancient-golem", "lancer", "sandoval", "kaelFinal", "kaelEarly", "conjurer"];
+const SPRITES: SpriteId[] = ["kael", "nira", "voss", "salazar", "malrec", "aldric", "defaultLancer", "soldier", "brigand", "captain", "sorcerer", "horror", "Asherah", "pikeman", "wardog", "troll", "morvenian-wolf", "butcher", "birolho", "birolho2", "familiar", "swamp-blue-calf", "ancient-golem", "lancer", "sandoval", "kaelFinal", "kaelEarly", "conjurer"];
 
 const LOAD_POOL = 8;
 let loadActive = 0;
@@ -136,8 +157,8 @@ export async function loadGameArt(): Promise<GameArt> {
   const attacks: Partial<Record<SpriteId, HTMLImageElement[]>> = {};
   await Promise.all(
     SPRITES.map(async (id) => {
-      const n = id === "conjurer" || id === "kael" || id === "kaelFinal" ? 36 : id === "sandoval" ? 8 : HERO_IDLE.has(id) ? 12 : 4;
-      const cacheBust = id === "troll" ? "?v=11" : id === "Asherah" ? "?v=3" : id === "familiar" ? "?v=6" : id === "malrec" || id === "aldric" || id === "defaultLancer" ? "?v=sheet2" : id === "lancer" ? "?v=3" : id === "sandoval" ? "?v=sandoval-complete-001" : id === "kael" || id === "kaelFinal" ? "?v=kael-final-002" : id === "kaelEarly" ? "?v=kael-early" : id === "conjurer" ? "?v=conjurer-complete-003" : "";
+      const n = id === "conjurer" || id === "kael" || id === "kaelFinal" || id === "aldric" ? 36 : id === "sandoval" ? 8 : id === "birolho2" ? 18 : HERO_IDLE.has(id) ? 12 : 4;
+      const cacheBust = id === "troll" ? "?v=11" : id === "Asherah" ? "?v=3" : id === "familiar" ? "?v=6" : id === "aldric" ? "?v=aldric-final-001" : id === "malrec" || id === "defaultLancer" ? "?v=sheet2" : id === "lancer" ? "?v=3" : id === "sandoval" ? "?v=sandoval-complete-001" : id === "kael" || id === "kaelFinal" ? "?v=kael-final-002" : id === "kaelEarly" ? "?v=kael-early" : id === "conjurer" ? "?v=conjurer-complete-003" : "";
       sprites[id] = await Promise.all(
         Array.from({ length: n }, (_, i) =>
           loadImage(spriteFrameSrc(id, id === "conjurer" ? `talk-${i + 1}` : `${i + 1}`, cacheBust)),
@@ -156,12 +177,13 @@ export async function loadGameArt(): Promise<GameArt> {
     voss: { n: 4, bust: "" },
     salazar: { n: 4, bust: "" },
     malrec: { n: 5, bust: "?v=sheet2" },
-    aldric: { n: 5, bust: "?v=sheet2" },
+    aldric: { n: 36, bust: "?v=aldric-final-001" },
     defaultLancer: { n: 5, bust: "?v=sheet2" },
     familiar: { n: 8, bust: "?v=6" },
     "ancient-golem": { n: 8, bust: "" },
     "morvenian-wolf": { n: 6, bust: "" },
     birolho: { n: 4, bust: "" },
+    birolho2: { n: 4, bust: "" },
     butcher: { n: 4, bust: "" },
     lancer: { n: 6, bust: "?v=3" },
     sandoval: { n: 6, bust: "?v=sandoval-complete-001" },
@@ -179,8 +201,12 @@ export async function loadGameArt(): Promise<GameArt> {
   // existed.
   const CAST_FRAMES: Partial<Record<SpriteId, { n: number; bust: string }>> = {
     birolho: { n: 3, bust: "" },
+    birolho2: { n: 3, bust: "" },
     // The spell cast intentionally uses the former Idle sheet; ATT remains the physical attack.
     conjurer: { n: 36, bust: "?v=conjurer-complete-003" },
+    // Aldric's dedicated skill pose — plays only for his spell-typed pike skills (Piercing
+    // Thrust, Sweep, ...), never for a plain attack, which stays on the ATT cut.
+    aldric: { n: 36, bust: "?v=aldric-final-001" },
   };
   const casts: Partial<Record<SpriteId, HTMLImageElement[]>> = {};
   await Promise.all(
@@ -189,13 +215,24 @@ export async function loadGameArt(): Promise<GameArt> {
       casts[id] = await Promise.all(Array.from({ length: n }, (_, i) => loadImage(spriteFrameSrc(id, id === "conjurer" ? `${i + 1}` : `cast-${i + 1}`, bust))));
     }),
   );
+  // Left-facing counterpart to a handful of the CAST_FRAMES cuts above — same idea as
+  // attacksLeft/walksLeft: a sprite here skips the mirrored flip and plays this set instead
+  // when facing === -1.
+  const CAST_DIR_LEFT: SpriteId[] = ["aldric"];
+  const castsLeft: Partial<Record<SpriteId, HTMLImageElement[]>> = {};
+  await Promise.all(
+    CAST_DIR_LEFT.map(async (id) => {
+      const { n, bust } = CAST_FRAMES[id]!;
+      castsLeft[id] = await Promise.all(Array.from({ length: n }, (_, i) => loadImage(spriteFrameSrc(id, `cast-left-${i + 1}`, bust))));
+    }),
+  );
   // Walk cycles: move-*.png, same shape as the attack table. A sprite absent from here has
   // no walk cut and falls back to its idle loop played faster, as every sprite used to.
   const WALK_FRAMES: Partial<Record<SpriteId, { n: number; bust: string }>> = {
     familiar: { n: 8, bust: "?v=6" },
     "ancient-golem": { n: 8, bust: "" },
     malrec: { n: 6, bust: "?v=sheet2" },
-    aldric: { n: 6, bust: "?v=sheet2" },
+    aldric: { n: 36, bust: "?v=aldric-final-001" },
     defaultLancer: { n: 6, bust: "?v=sheet2" },
     lancer: { n: 6, bust: "?v=3" },
     sandoval: { n: 6, bust: "?v=sandoval-complete-001" },
@@ -219,7 +256,7 @@ export async function loadGameArt(): Promise<GameArt> {
     DIR_LEFT.map(async (id) => {
       const walkN = WALK_FRAMES[id]?.n ?? 6;
       const atkN = ATTACK_FRAMES[id]?.n ?? 5;
-      const bust = id === "lancer" ? "?v=3" : id === "sandoval" ? "?v=sandoval-complete-001" : "?v=sheet2";
+      const bust = id === "lancer" ? "?v=3" : id === "sandoval" ? "?v=sandoval-complete-001" : id === "aldric" ? "?v=aldric-final-001" : "?v=sheet2";
       walksLeft[id] = await Promise.all(Array.from({ length: walkN }, (_, i) => loadImage(spriteFrameSrc(id, `move-left-${i + 1}`, bust))));
       attacksLeft[id] = await Promise.all(Array.from({ length: atkN }, (_, i) => loadImage(spriteFrameSrc(id, `atk-left-${i + 1}`, bust))));
     }),
@@ -253,11 +290,16 @@ export async function loadGameArt(): Promise<GameArt> {
       back: await loadImage("/game/sprites/birolho/back.png"),
       side: await loadImage("/game/sprites/birolho/1.png"),
     },
+    birolho2: {
+      front: await loadImage("/game/sprites/birolho2/1.png"),
+      back: await loadImage("/game/sprites/birolho2/back.png"),
+      side: await loadImage("/game/sprites/birolho2/1.png"),
+    },
     butcher: {
       front: await loadImage("/game/sprites/butcher/front.png"),
       back: await loadImage("/game/sprites/butcher/back.png"),
       side: await loadImage("/game/sprites/butcher/front.png"),
     },
   };
-  return { tiles, decorations, sprites, attacks, attacksLeft, casts, walks, walksLeft, idles, walkDirs, impact, fireballCore, causticVenomCore, arrowCore, lightningCores, backdrops };
+  return { tiles, decorations, sprites, attacks, attacksLeft, casts, castsLeft, walks, walksLeft, idles, walkDirs, impact, fireballCore, causticVenomCore, arrowCore, lightningCores, backdrops };
 }

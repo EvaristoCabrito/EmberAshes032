@@ -37,6 +37,16 @@ export function BattleCanvas({
     let mouseDown = false;
     let lastX = 0;
     let lastY = 0;
+    // Mouse hold-and-grab-to-pan: the button must stay down this long before a drag counts
+    // as panning, so a quick click near a unit/tile never gets swallowed by a small
+    // incidental jitter. mouseStartX/Y anchor the "moved far enough since the press" check;
+    // lastX/Y (above) are updated every move so the pan itself only ever applies one frame's
+    // delta, never a jump built up while waiting to arm.
+    const MOUSE_PAN_HOLD_MS = 650;
+    let mouseArmed = false;
+    let mouseStartX = 0;
+    let mouseStartY = 0;
+    let mouseHoldTimer: number | null = null;
     const held = new Set<string>();
     const pointers = new Map<number, { x: number; y: number }>();
     // Press-and-hold on a tile reads out its terrain. It has to coexist with dragging the
@@ -129,6 +139,7 @@ export function BattleCanvas({
         hud.turnQueue.find((q) => q.active)?.id,
         hud.turnQueue.map((q) => (q.acted ? "1" : "0")).join(""),
         hud.chestLoot ? `${hud.chestLoot.unitName}:${hud.chestLoot.ember}:${hud.chestLoot.items.map((i) => i.name).join(",")}` : null,
+        hud.pendingDialog ? `${hud.pendingDialog.id}` : null,
       ].join("|");
       if (k !== hudKey.current) {
         hudKey.current = k;
@@ -156,10 +167,18 @@ export function BattleCanvas({
         mouseDown = true;
         dragging = true;
         dragged = false;
+        mouseArmed = false;
+        mouseStartX = e.clientX;
+        mouseStartY = e.clientY;
         lastX = e.clientX;
         lastY = e.clientY;
         canvas.setPointerCapture(e.pointerId);
         canvas.style.cursor = "grabbing";
+        if (mouseHoldTimer !== null) window.clearTimeout(mouseHoldTimer);
+        mouseHoldTimer = window.setTimeout(() => {
+          mouseHoldTimer = null;
+          mouseArmed = true;
+        }, MOUSE_PAN_HOLD_MS);
         return;
       }
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -203,15 +222,13 @@ export function BattleCanvas({
       if (e.pointerType === "mouse" && mouseDown) {
         const dx = e.clientX - lastX;
         const dy = e.clientY - lastY;
-        if (Math.abs(dx) + Math.abs(dy) > 3) {
+        if (!dragged && mouseArmed && Math.hypot(e.clientX - mouseStartX, e.clientY - mouseStartY) > 3) {
           dragged = true;
           cancelHold();
         }
-        if (dragged) {
-          engine.panBy(-dx, -dy);
-          lastX = e.clientX;
-          lastY = e.clientY;
-        }
+        if (dragged) engine.panBy(-dx, -dy);
+        lastX = e.clientX;
+        lastY = e.clientY;
         return;
       }
       if (dragging && e.pointerType !== "mouse" && !spell) {
@@ -240,6 +257,11 @@ export function BattleCanvas({
       cancelHold();
       if (e.pointerType === "mouse") {
         canvas.style.cursor = "";
+        if (mouseHoldTimer !== null) {
+          window.clearTimeout(mouseHoldTimer);
+          mouseHoldTimer = null;
+        }
+        mouseArmed = false;
         if (!mouseDown) return;
         mouseDown = false;
         dragging = false;
@@ -329,6 +351,7 @@ export function BattleCanvas({
       cancelAnimationFrame(raf);
       ro.disconnect();
       cancelHold();
+      if (mouseHoldTimer !== null) window.clearTimeout(mouseHoldTimer);
       canvas.removeEventListener("pointerdown", onDown);
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerup", onUp);

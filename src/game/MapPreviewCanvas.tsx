@@ -158,7 +158,7 @@ export function MapPreviewCanvas({ mission, art, onCellClick, selectedDecoration
       drag.armed = true;
       // The hand is the immediate confirmation that the hold-to-pan gesture is ready.
       setIsPanning(true);
-    }, 1000);
+    }, 650);
   };
   const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
     const unitDrag = unitDragRef.current;

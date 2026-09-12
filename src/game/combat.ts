@@ -35,20 +35,54 @@ function weaponClassBonusMul(attacker: Unit): number {
   return weapon?.bonusClass === attacker.classId ? WEAPON_CLASS_BONUS_MUL : 1;
 }
 
+/** Full-strength ATT/DEF (or MAG/RES for a caster) feeding ONLY the hit-chance formulas
+ * below — separate from powerOf/protOf's halved stat, which still drives damage exactly as
+ * before. Same weapon-roll + terrain bonus inputs damage already uses. */
+function effectivePower(
+  attacker: Unit,
+  defender: Unit,
+  weaponOrDiceRoll: number,
+  b: { atk: number; def: number },
+): { att: number; def: number; magical: boolean } {
+  const magical = attacker.mag > 0;
+  const att = (magical ? attacker.mag : attacker.atk) + weaponOrDiceRoll + b.atk;
+  const def = (magical ? defender.res : defender.def) + b.def;
+  return { att, def, magical };
+}
+
+/** Physical accuracy: high enough that missing is rare, reserved for a defender who has
+ * built up roughly double the attacker's ATT in DEF. */
+function physicalHitChance(att: number, def: number): number {
+  return Math.min(99, Math.max(75, 90 + (att - def) / 2));
+}
+
+/** Magic bypasses dodge/evasion almost entirely — RES only trims an already-near-certain
+ * hit, at a quarter the sensitivity of DEF against a physical attack. */
+function magicalHitChance(mag: number, res: number): number {
+  return Math.min(100, Math.max(85, 95 + (mag - res) / 4));
+}
+
+function hitChanceFor(att: number, def: number, magical: boolean): number {
+  return magical ? magicalHitChance(att, def) : physicalHitChance(att, def);
+}
+
 export function rollDamage(
   attacker: Unit,
   defender: Unit,
   attTile: TerrainId,
   defTile: TerrainId,
   rng: () => number,
-): { dmg: number; crit: boolean } {
+): { dmg: number; crit: boolean; landed: boolean; hitChance: number } {
   const b = terrainBonus(attacker, defender, attTile, defTile);
   const weapon = weaponRoll(attacker.weaponId, attacker.weaponEnh, rng);
+  const { att, def, magical } = effectivePower(attacker, defender, weapon, b);
+  const hitChance = hitChanceFor(att, def, magical);
+  if (rng() * 100 >= hitChance) return { dmg: 0, crit: false, landed: false, hitChance };
   const raw = powerOf(attacker) + weapon + b.atk - protOf(attacker, defender) - b.def;
   let dmg = Math.max(1, Math.round(Math.max(1, raw) * weaponClassBonusMul(attacker)));
   const crit = rng() < 0.08;
   if (crit) dmg = Math.max(1, Math.floor(dmg * 1.5));
-  return { dmg, crit };
+  return { dmg, crit, landed: true, hitChance };
 }
 
 /** Same formula as rollDamage, but rolling explicit dice instead of the attacker's
@@ -63,14 +97,17 @@ export function rollDamageCustom(
   faces: number,
   bonus: number,
   rng: () => number,
-): { dmg: number; crit: boolean } {
+): { dmg: number; crit: boolean; landed: boolean; hitChance: number } {
   const b = terrainBonus(attacker, defender, attTile, defTile);
   const weapon = rollDice(dice, faces, bonus, rng);
+  const { att, def, magical } = effectivePower(attacker, defender, weapon, b);
+  const hitChance = hitChanceFor(att, def, magical);
+  if (rng() * 100 >= hitChance) return { dmg: 0, crit: false, landed: false, hitChance };
   const raw = powerOf(attacker) + weapon + b.atk - protOf(attacker, defender) - b.def;
   let dmg = Math.max(1, raw);
   const crit = rng() < 0.08;
   if (crit) dmg = Math.max(1, Math.floor(dmg * 1.5));
-  return { dmg, crit };
+  return { dmg, crit, landed: true, hitChance };
 }
 
 export function previewDamage(
@@ -78,11 +115,14 @@ export function previewDamage(
   defender: Unit,
   attTile: TerrainId,
   defTile: TerrainId,
-): number {
+): { dmg: number; hitChance: number } {
   const b = terrainBonus(attacker, defender, attTile, defTile);
   const weapon = weaponPreview(attacker.weaponId, attacker.weaponEnh);
+  const { att, def, magical } = effectivePower(attacker, defender, weapon, b);
+  const hitChance = hitChanceFor(att, def, magical);
   const raw = powerOf(attacker) + weapon + b.atk - protOf(attacker, defender) - b.def;
-  return Math.max(1, Math.round(Math.max(1, raw) * weaponClassBonusMul(attacker)));
+  const dmg = Math.max(1, Math.round(Math.max(1, raw) * weaponClassBonusMul(attacker)));
+  return { dmg, hitChance: Math.round(hitChance) };
 }
 
 export function canCounter(
@@ -104,17 +144,19 @@ export function makeForecast(
   tiles: TerrainId[],
   cols: number,
 ): Forecast {
-  const dmgOut = previewDamage(attacker, defender, attTile, defTile);
+  const out = previewDamage(attacker, defender, attTile, defTile);
   const counter = canCounter(attacker, defender, { x: attacker.x, y: attacker.y }, tiles, cols);
-  const dmgBack = counter ? previewDamage(defender, attacker, defTile, attTile) : 0;
+  const back = counter ? previewDamage(defender, attacker, defTile, attTile) : null;
   return {
     attacker: attacker.id,
     defender: defender.id,
-    dmgOut,
-    dmgBack,
+    dmgOut: out.dmg,
+    dmgBack: back?.dmg ?? 0,
+    hitOut: out.hitChance,
+    hitBack: back?.hitChance ?? 0,
     canCounter: counter,
     critOut: false,
-    kill: dmgOut >= defender.hp,
+    kill: out.dmg >= defender.hp,
   };
 }
 

@@ -225,6 +225,7 @@ export const sfxPlay = {
     noise(0.07, 0.2);
     beep(210, 0.24, "square", 0.18, -160);
   },
+  miss: () => beep(480, 0.1, "sine", 0.14, 240),
   chest: () => {
     beep(700, 0.05, "square", 0.14);
     setTimeout(() => beep(920, 0.09, "triangle", 0.18, 220), 60);

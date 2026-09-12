@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
-import { BAG_MAX, CLASSES, EMPTY_BAG, EQUIPMENT, EQUIPMENT_SLOTS, POTION_CARRY_MAX, WEAPONS, equipmentFitsSlot, equipmentIcon, equipmentStatSummary, equipmentTooltip, equipmentTypeSlotName, heroRecruited, lockpickTooltip, offHandBlocked, potionLabel, potionTooltip, weaponDiceLabel, weaponIcon, weaponPower, weaponRangeLabel, weaponTooltip, weaponsForClass } from "./data";
+import { BAG_MAX, CLASSES, EMPTY_BAG, EQUIPMENT, EQUIPMENT_SLOTS, POTION_CARRY_MAX, WEAPONS, equipmentFitsSlot, equipmentIcon, equipmentStatSummary, equipmentTooltip, equipmentTypeSlotName, heroRecruited, isPlayableClassForDisplay, lockpickTooltip, offHandBlocked, potionLabel, potionTooltip, weaponDiceLabel, weaponIcon, weaponPower, weaponRangeLabel, weaponTooltip, weaponsForClass } from "./data";
 import type { ClassId, EquipSlot, PotionId, SaveData } from "./types";
 
 const POTIONS: PotionId[] = ["weak", "mid", "potent", "disease", "manaSmall", "manaMid", "manaLarge"];
@@ -44,6 +44,7 @@ export function PaperDollScreen({
   onSwitchToBackpack,
   onEquipWeapon,
   onEquipItem,
+  glowSlot = null,
   embedded = false,
 }: {
   heroName: string;
@@ -53,6 +54,10 @@ export function PaperDollScreen({
   onSwitchToBackpack?: () => void;
   onEquipWeapon?: (hero: string, weaponId: string) => void;
   onEquipItem?: (hero: string, slot: EquipSlot, itemId: string | null) => void;
+  /** Briefly highlights the slot the same way the Inn glows an open location — for when a
+   * weapon/item was just equipped from the Mochila's own list instead of through the
+   * picker below, which otherwise gives no indication of where it landed. */
+  glowSlot?: "mainHand" | EquipSlot | null;
   embedded?: boolean;
 }) {
   const [picker, setPicker] = useState<"mainHand" | EquipSlot | null>(null);
@@ -96,7 +101,7 @@ export function PaperDollScreen({
               type="button"
               disabled={!onEquipWeapon}
               onClick={() => setPicker("mainHand")}
-              className="w-full flex items-center gap-2 bg-bg border border-border rounded-md px-2 py-1.5 text-left disabled:cursor-default"
+              className={`w-full flex items-center gap-2 rounded-md border px-2 py-1.5 text-left disabled:cursor-default bg-bg ${glowSlot === "mainHand" ? "inn-open" : "border-border"}`}
             >
               {weapon ? (
                 <>
@@ -106,7 +111,7 @@ export function PaperDollScreen({
                     <span className="block text-[11px] text-muted tabular-nums">
                       {weaponDiceLabel(weapon.id)} · {weaponRangeLabel(weapon.id)}
                     </span>
-                    {weapon.bonusClass && (
+                    {weapon.bonusClass && isPlayableClassForDisplay(weapon.bonusClass) && (
                       <span className={`block text-[11px] tabular-nums ${weapon.bonusClass === classId ? "text-accent" : "text-muted"}`}>
                         +10% dano · {CLASSES[weapon.bonusClass].name}
                       </span>
@@ -141,7 +146,7 @@ export function PaperDollScreen({
                   <button
                     type="button"
                     onClick={() => setPicker(s.id)}
-                    className="w-full bg-bg border border-border rounded-md px-2 py-1.5 text-left flex items-center gap-2"
+                    className={`w-full rounded-md border px-2 py-1.5 text-left flex items-center gap-2 bg-bg ${glowSlot === s.id ? "inn-open" : "border-border"}`}
                   >
                     <span className="flex-1 min-w-0">
                       <span className="block text-[10px] uppercase tracking-wide text-muted">{s.label}</span>
@@ -226,7 +231,7 @@ export function PaperDollScreen({
                           <span className="block text-[11px] text-muted tabular-nums">
                             {weaponDiceLabel(w.id)} · {weaponRangeLabel(w.id)}
                           </span>
-                          {w.bonusClass && (
+                          {w.bonusClass && isPlayableClassForDisplay(w.bonusClass) && (
                             <span className={`block text-[11px] tabular-nums ${w.bonusClass === classId ? "text-accent" : "text-muted"}`}>
                               +10% dano · {CLASSES[w.bonusClass].name}
                             </span>
@@ -321,23 +326,28 @@ export function PaperDollScreen({
 /** Backpack overview: this hero's potions/gazuas plus the party's shared weapon and equipment stash. */
 export function BackpackScreen({
   heroName,
+  classId,
   save,
   onClose,
   onSwitchToDoll,
+  onEquipWeapon,
+  onEquipItem,
   embedded = false,
 }: {
   heroName: string;
+  classId?: ClassId;
   save: SaveData;
   onClose: () => void;
   onSwitchToDoll?: () => void;
+  /** Clicking a weapon here equips it straight onto this hero — only offered when the
+   * weapon actually fits their class (see weaponsForClass below). */
+  onEquipWeapon?: (hero: string, weaponId: string) => void;
+  /** Same, for a piece of shared Equipamento — only offered when it fits the hero's class
+   * and a slot for it is actually free to pick automatically (see targetSlotFor below). */
+  onEquipItem?: (hero: string, slot: EquipSlot, itemId: string | null) => void;
   embedded?: boolean;
 }) {
   const bag = save.bags[heroName] ?? EMPTY_BAG;
-  // Only counts potions toward pouch capacity — lockpicks are tracked separately (see the
-  // Bag.lockpick doc comment) and aren't a "found in the field" consumable in the same
-  // sense. Only the small pouch exists so far (see BAG_ICON's own note), hence the flat 30.
-  const bagCount = POTIONS.reduce((n, kind) => n + (bag[kind] ?? 0), 0);
-  const bagCapacity = 30;
   const weaponEntries = Object.entries(save.weapons).filter(([id]) => {
     const wielder = Object.entries(save.equipped).find(([, v]) => v === id)?.[0];
     return !wielder || heroRecruited(wielder, save.completed);
@@ -357,6 +367,21 @@ export function BackpackScreen({
       const wearer = wearerOf(id);
       return !wearer || heroRecruited(wearer, save.completed);
     });
+  // The 30-slot count is the magic bag of holding for the party's shared weapons/equipment
+  // stash — potions and lockpicks are each hero's own separate per-kind stack (see
+  // POTION_CARRY_MAX/BAG_MAX below) and never count against it.
+  const bagCount = weaponEntries.length + equipmentEntries.reduce((n, [, qty]) => n + qty, 0);
+  const bagCapacity = 30;
+  const heroEquip = save.equipment[heroName] ?? {};
+  /** Which slot a click-to-equip should fill: rings pick whichever finger is free (ring1
+   * first), everything else has exactly one slot — except offHand, which has none at all
+   * while the main hand holds a two-handed weapon. Returns null when there's nowhere for
+   * it to go automatically (the picker on the doll itself still handles that case). */
+  const targetSlotFor = (item: (typeof EQUIPMENT)[string]): EquipSlot | null => {
+    if (item.slot === "ring1" || item.slot === "ring2") return heroEquip.ring1 ? "ring2" : "ring1";
+    if (item.slot === "offHand" && offHandBlocked(save.equipped[heroName] ?? null)) return null;
+    return item.slot;
+  };
 
   return (
     <div
@@ -375,11 +400,6 @@ export function BackpackScreen({
               <p className="font-display text-xl leading-tight drop-shadow-[0_1px_3px_rgba(0,0,0,0.8)]">Mochila</p>
             </div>
             <p className="text-xs text-fg/80 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">{heroName}</p>
-            <p
-              className={`text-[11px] tabular-nums mt-0.5 ${bagCount >= bagCapacity ? "text-danger" : "text-fg/70"} drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]`}
-            >
-              {bagCount} / {bagCapacity} itens
-            </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {onSwitchToDoll && (
@@ -426,22 +446,43 @@ export function BackpackScreen({
 
         {weaponEntries.length > 0 && (
           <>
-            <p className="text-xs uppercase tracking-[0.18em] text-muted mt-4 mb-2">Armas do grupo</p>
+            <div className="flex items-baseline justify-between gap-2 mt-4 mb-2">
+              <p className="text-xs uppercase tracking-[0.18em] text-muted">Armas do grupo</p>
+              <p className={`text-[11px] tabular-nums ${bagCount >= bagCapacity ? "text-danger" : "text-muted"}`}>
+                {bagCount} / {bagCapacity} itens
+              </p>
+            </div>
             <div className="flex flex-col gap-1.5">
               {weaponEntries.map(([id, enh]) => {
                 const w = WEAPONS[id];
                 if (!w) return null;
                 const wielder = Object.entries(save.equipped).find(([, v]) => v === id)?.[0];
+                const isThisHeros = wielder === heroName;
+                const fitsClass = !!classId && weaponsForClass(classId).some((cw) => cw.id === id);
+                const canEquip = !!onEquipWeapon && fitsClass && !isThisHeros;
+                const content = (
+                  <>
+                    <img src={weaponIcon(id)} alt="" className="size-6 rounded-sm object-cover shrink-0" />
+                    <p className="flex-1 text-sm min-w-0 truncate">
+                      {w.name} {enh > 0 ? `+${enh}` : ""}
+                      <span className="block text-[10px] uppercase tracking-wide text-muted">Mão principal</span>
+                    </p>
+                    <p className="text-[11px] text-muted shrink-0">{isThisHeros ? "equipada" : wielder ? `em ${wielder}` : "reserva"}</p>
+                  </>
+                );
                 return (
                   <ItemTip key={id} text={weaponTooltip(w, enh)} className="block">
-                    <div className="flex items-center gap-1.5 bg-bg border border-border rounded-md px-2 py-1.5">
-                      <img src={weaponIcon(id)} alt="" className="size-6 rounded-sm object-cover shrink-0" />
-                      <p className="flex-1 text-sm min-w-0 truncate">
-                        {w.name} {enh > 0 ? `+${enh}` : ""}
-                        <span className="block text-[10px] uppercase tracking-wide text-muted">Mão principal</span>
-                      </p>
-                      <p className="text-[11px] text-muted shrink-0">{wielder ? `em ${wielder}` : "reserva"}</p>
-                    </div>
+                    {canEquip ? (
+                      <button
+                        type="button"
+                        onClick={() => onEquipWeapon(heroName, id)}
+                        className="w-full flex items-center gap-1.5 bg-bg border border-border rounded-md px-2 py-1.5 text-left"
+                      >
+                        {content}
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-1.5 bg-bg border border-border rounded-md px-2 py-1.5">{content}</div>
+                    )}
                   </ItemTip>
                 );
               })}
@@ -457,16 +498,33 @@ export function BackpackScreen({
                 const it = EQUIPMENT[id];
                 if (!it) return null;
                 const wearer = wearerOf(id);
+                const isThisHeros = wearer === heroName;
+                const fitsClass = !!classId && (!it.usableBy || it.usableBy.includes(classId));
+                const targetSlot = classId ? targetSlotFor(it) : null;
+                const canEquip = !!onEquipItem && fitsClass && !isThisHeros && !!targetSlot;
+                const content = (
+                  <>
+                    <img src={equipmentIcon(id)} alt="" className="size-6 rounded-sm object-cover shrink-0" />
+                    <p className="flex-1 text-sm min-w-0 truncate">
+                      {it.name} {count > 1 ? `×${count}` : ""}
+                      <span className="block text-[10px] uppercase tracking-wide text-muted">{equipmentTypeSlotName(it)}</span>
+                    </p>
+                    <p className="text-[11px] text-muted shrink-0">{isThisHeros ? "equipado" : wearer ? `em ${wearer}` : "reserva"}</p>
+                  </>
+                );
                 return (
                   <ItemTip key={id} text={equipmentTooltip(it)} className="block">
-                    <div className="flex items-center gap-1.5 bg-bg border border-border rounded-md px-2 py-1.5">
-                      <img src={equipmentIcon(id)} alt="" className="size-6 rounded-sm object-cover shrink-0" />
-                      <p className="flex-1 text-sm min-w-0 truncate">
-                        {it.name} {count > 1 ? `×${count}` : ""}
-                        <span className="block text-[10px] uppercase tracking-wide text-muted">{equipmentTypeSlotName(it)}</span>
-                      </p>
-                      <p className="text-[11px] text-muted shrink-0">{wearer ? `em ${wearer}` : "reserva"}</p>
-                    </div>
+                    {canEquip ? (
+                      <button
+                        type="button"
+                        onClick={() => onEquipItem(heroName, targetSlot, id)}
+                        className="w-full flex items-center gap-1.5 bg-bg border border-border rounded-md px-2 py-1.5 text-left"
+                      >
+                        {content}
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-1.5 bg-bg border border-border rounded-md px-2 py-1.5">{content}</div>
+                    )}
                   </ItemTip>
                 );
               })}
@@ -496,6 +554,28 @@ export function PartyInventoryOverlay({
   onEquipWeapon?: (hero: string, weaponId: string) => void;
   onEquipItem?: (hero: string, slot: EquipSlot, itemId: string | null) => void;
 }) {
+  // Equipping straight from the Mochila's shared lists (rather than through a picker on
+  // the doll itself) has no other feedback showing where it landed — with a long list,
+  // "which slot did that just fill?" isn't obvious. Flash the same glow the Inn uses for
+  // a couple seconds on the slot it just filled.
+  const [glowSlot, setGlowSlot] = useState<"mainHand" | EquipSlot | null>(null);
+  const glowTimer = useRef<number | null>(null);
+  const flashGlow = (slot: "mainHand" | EquipSlot) => {
+    if (glowTimer.current !== null) window.clearTimeout(glowTimer.current);
+    setGlowSlot(slot);
+    glowTimer.current = window.setTimeout(() => setGlowSlot(null), 1800);
+  };
+  const handleEquipWeapon = (hero: string, weaponId: string) => {
+    onEquipWeapon?.(hero, weaponId);
+    if (weaponId) flashGlow("mainHand");
+  };
+  const handleEquipItem = (hero: string, slot: EquipSlot, itemId: string | null) => {
+    onEquipItem?.(hero, slot, itemId);
+    if (itemId) flashGlow(slot);
+  };
+  useEffect(() => () => {
+    if (glowTimer.current !== null) window.clearTimeout(glowTimer.current);
+  }, []);
   return (
     <div
       className="absolute inset-0 z-40 grid place-items-center bg-bg/85 p-3 sm:p-4"
@@ -504,7 +584,15 @@ export function PartyInventoryOverlay({
       }}
     >
       <div className="grid h-[min(88dvh,48rem)] w-full max-w-6xl min-w-0 grid-cols-1 gap-3 overflow-x-hidden overflow-y-auto lg:grid-cols-2 lg:overflow-y-hidden">
-        <BackpackScreen heroName={heroName} save={save} onClose={onClose} embedded />
+        <BackpackScreen
+          heroName={heroName}
+          classId={classId}
+          save={save}
+          onClose={onClose}
+          onEquipWeapon={onEquipWeapon && handleEquipWeapon}
+          onEquipItem={onEquipItem && handleEquipItem}
+          embedded
+        />
         <PaperDollScreen
           heroName={heroName}
           classId={classId}
@@ -512,6 +600,7 @@ export function PartyInventoryOverlay({
           onClose={onClose}
           onEquipWeapon={onEquipWeapon}
           onEquipItem={onEquipItem}
+          glowSlot={glowSlot}
           embedded
         />
       </div>

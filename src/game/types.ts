@@ -55,10 +55,12 @@ export type ClassId =
   | "morvenianWolf"
   | "butcher"
   | "birolho"
+  | "birolho2"
   | "swampBlueCalf"
   | "assassin"
   | "rogue"
   | "lancer"
+  | "aldric"
   | "sandoval"
   | "kaelFinal"
   | "kaelEarly"
@@ -80,7 +82,7 @@ export type ClassId =
   // computed live from its summoner (see castSummonFamiliar), CLASSES.familiar only
   // supplies a sprite/size/range fallback and satisfies the ClassId-keyed tables below.
   | "familiar";
-export type SpriteId = "kael" | "nira" | "voss" | "salazar" | "malrec" | "aldric" | "defaultLancer" | "soldier" | "brigand" | "captain" | "sorcerer" | "horror" | "Asherah" | "pikeman" | "wardog" | "troll" | "morvenian-wolf" | "butcher" | "birolho" | "familiar" | "swamp-blue-calf" | "ancient-golem" | "lancer" | "sandoval" | "kaelFinal" | "kaelEarly" | "conjurer";
+export type SpriteId = "kael" | "nira" | "voss" | "salazar" | "malrec" | "aldric" | "defaultLancer" | "soldier" | "brigand" | "captain" | "sorcerer" | "horror" | "Asherah" | "pikeman" | "wardog" | "troll" | "morvenian-wolf" | "butcher" | "birolho" | "birolho2" | "familiar" | "swamp-blue-calf" | "ancient-golem" | "lancer" | "sandoval" | "kaelFinal" | "kaelEarly" | "conjurer";
 export type HealId = "cureMinor" | "cureWounds" | "cureLight";
 export type SpellKind =
   | "fireball"
@@ -167,6 +169,35 @@ export interface ClassDef {
   summon?: true;
 }
 
+/** One reply choice inside a branching DialogLine. Picking it jumps to `next`, or ends the
+ * tree if `next` is absent/null — same convention as DialogLine.next below. */
+export interface DialogReply {
+  text: string;
+  next?: string | null;
+}
+
+/** One screen of the dialog popup: a speaker, an optional portrait, and the line itself.
+ * Either it links straight to the next line (`next`, plain "OK" to continue) or it branches
+ * (`replies`, one button per reply) — never both; `replies` wins if somehow both are set. */
+export interface DialogLine {
+  id: string;
+  speaker: string;
+  /** A SpriteId to resolve a portrait image from (see resolveDialogPortrait) — omitted shows
+   * no image, just the speaker name and text. */
+  portrait?: SpriteId;
+  text: string;
+  replies?: DialogReply[];
+  next?: string | null;
+}
+
+/** A whole conversation: attached to a Mission (intro/outro) or to a neutral Spawn (an NPC's
+ * own conversation, replayed from `startId` every time that unit is clicked). */
+export interface DialogTree {
+  id: string;
+  startId: string;
+  lines: DialogLine[];
+}
+
 export interface Spawn {
   name: string;
   classId: ClassId;
@@ -176,6 +207,11 @@ export interface Spawn {
    * the same random weapon-or-gear pool a chest rolls from) when this unit dies — for named
    * unique bosses the mission wants to reliably reward. */
   guaranteedDrop?: boolean;
+  /** Turns this spawn into a talkable NPC: clicking it opens the tree instead of the normal
+   * attack/inspect flow, and it can never be attacked (see attackableByPlayer in engine.ts).
+   * Meant for neutral-side spawns — a neutral with no dialog stays the existing wild-beast
+   * behavior, unchanged. */
+  dialog?: DialogTree;
 }
 
 export type WinCondition = "rout" | "boss";
@@ -290,6 +326,17 @@ export interface Mission {
    * door/sub-area rather than just leaving out in the open. Omitted on every existing
    * mission — purely additive. */
   betterChests?: { x: number; y: number }[];
+  /** Shown once, before the player can act, right as the battle screen opens. Omitted on
+   * every existing mission — purely additive. */
+  introDialog?: DialogTree;
+  /** Turns introDialog off without deleting it — absent behaves as on whenever introDialog
+   * is set, so only an explicit `false` ever suppresses it. */
+  introDialogEnabled?: boolean;
+  /** Shown once victory is confirmed (the player clicked "Encerrar missão"), before leaving
+   * to the results screen. Never shown on defeat. Omitted on every existing mission. */
+  outroDialog?: DialogTree;
+  /** Same on/off convention as introDialogEnabled. */
+  outroDialogEnabled?: boolean;
 }
 
 /** A travel spot on the campaign world map. Most locations cover a single mission; a
@@ -395,6 +442,9 @@ export interface Unit {
   sleepTurns: number;
   /** Mirrors Spawn.guaranteedDrop — read once in markDead, never touched afterward. */
   guaranteedDrop: boolean;
+  /** Mirrors Spawn.dialog — a unit carrying one is a talkable NPC: never an attack target
+   * (see attackableByPlayer), and clicking it opens this tree instead of inspect. */
+  dialog: DialogTree | null;
   /** Total path cost already spent moving this unit's own turn — reset once in
    * beginUnitTurn. Free repositioning (see effectiveUnitForReach) recomputes reach fresh
    * from wherever the unit currently stands after every move, which without this would
@@ -528,6 +578,10 @@ export interface Forecast {
   defender: string;
   dmgOut: number;
   dmgBack: number;
+  /** Chance (0-100) the outgoing hit / the counter lands — see combat.ts's
+   * physicalHitChance/magicalHitChance. */
+  hitOut: number;
+  hitBack: number;
   canCounter: boolean;
   critOut: boolean;
   kill: boolean;
@@ -588,6 +642,9 @@ export interface HudSnapshot {
    * (see acknowledgeChestLoot) — not a transient "just happened" flag like tip, so it
    * survives sitting on screen until the player actually reads it. */
   chestLoot: { unitName: string; ember: number; items: { name: string; icon: string; tip?: string }[] } | null;
+  /** Set the instant a dialog-bearing NPC is clicked, cleared only via acknowledgeDialog —
+   * same "sits until dismissed" convention as chestLoot above. */
+  pendingDialog: DialogTree | null;
 }
 
 export interface WalkDirs {
@@ -616,6 +673,9 @@ export interface GameArt {
    * `walks` / `attacks`). Idle still uses the shared 12-frame sheet and the regular flip. */
   walksLeft: Partial<Record<SpriteId, HTMLImageElement[]>>;
   attacksLeft: Partial<Record<SpriteId, HTMLImageElement[]>>;
+  /** Left-facing counterpart to `casts`, for the sprites that have one cut. Falls back to
+   * `casts` (mirrored via the regular flip) for every sprite without one. */
+  castsLeft: Partial<Record<SpriteId, HTMLImageElement[]>>;
   idles: Partial<Record<SpriteId, HTMLImageElement[]>>;
   walkDirs: Partial<Record<SpriteId, WalkDirs>>;
   impact: HTMLImageElement[];
@@ -673,6 +733,7 @@ export interface BattleUnitSnap {
   asleep: boolean;
   sleepTurns: number;
   guaranteedDrop: boolean;
+  dialog: DialogTree | null;
   moveBudgetUsed: number;
 }
 
@@ -695,6 +756,7 @@ export interface BattleSnapshot {
   log: string[];
   winAvailable: boolean;
   chestLoot: { unitName: string; ember: number; items: { name: string; icon: string; tip?: string }[] } | null;
+  pendingDialog: DialogTree | null;
   turnRestrained: boolean;
   /** True when beginUnitTurn already ran for the current actor — load must not re-apply
    * start-of-turn echo/poison/stun. False when the next unit hasn't opened their turn yet. */

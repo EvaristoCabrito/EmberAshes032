@@ -236,6 +236,7 @@ The processor is intentionally low-level. The agent chooses:
 - `component_mode`
 - `component_padding`
 - `edge_touch` rejection strategy
+- `locked_scale` / `reference_meta` — required for any class in a multi-class roster after the first (the reference/master character); never let each class auto-fit its own bbox
 
 Use the processor to gather QC metadata, not to make aesthetic decisions for you.
 
@@ -305,6 +306,7 @@ For `hero_action_bundle`, expect:
   - use as delivery atlases for mixed actions only after separate action sheets pass QC
 - use `shared_scale` by default for any multi-frame asset where frame-to-frame consistency matters
 - use `largest` component mode for hero/player body grids; use `all` for separate FX/projectile/impact sheets
+- for a multi-class roster sharing one human scale, `shared_scale` only keeps frames consistent WITHIN one class's own sheet — it still auto-fits from that class's own ink bbox (weapon included). Process the roster's reference/master character first, then pass `--locked-scale <value>` (or `--reference-meta <master's pipeline-meta.json>`) to every other class's `process` run so a long spear/staff/bow doesn't shrink that class's body relative to the rest of the roster
 
 ## Resources
 

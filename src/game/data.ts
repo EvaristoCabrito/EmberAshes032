@@ -52,7 +52,7 @@ export const TERRAIN: Record<TerrainId, TerrainDef> = {
   ruins: { id: "ruins", name: "Ruínas", moveCost: 1, def: 2, atk: 0, passable: true },
   water: { id: "water", name: "Água", moveCost: 99, def: 0, atk: 0, passable: false },
   ember: { id: "ember", name: "Brasa", moveCost: 2, def: 0, atk: 0, passable: true, hazardDice: 1, hazardFaces: 6 },
-  hill: { id: "hill", name: "Barranco", moveCost: 2, def: 1, atk: 2, passable: true, height: 1 },
+  hill: { id: "hill", name: "Colina", moveCost: 2, def: 1, atk: 2, passable: true, height: 1 },
   flame: { id: "flame", name: "Chama", moveCost: 3, def: 0, atk: 0, passable: true, hazardDice: 1, hazardFaces: 8 },
   column: { id: "column", name: "Coluna", moveCost: 99, def: 0, atk: 0, passable: false, blocksShot: true },
   nave: { id: "nave", name: "Laje", moveCost: 1, def: 0, atk: 0, passable: true },
@@ -595,6 +595,26 @@ export const CLASSES: Record<ClassId, ClassDef> = {
     footprintOffsets: FOOTPRINT_TYPE_7,
     init: 6,
   },
+  // A second, distinct Birolho-kit abomination — same stats/spells/AI as birolho, its own
+  // sprite. See birolhoSpellUses/ENEMY_MAGE_IDS/shockChargesFor and the AI + isArcaneCaster
+  // branches in engine.ts, all of which treat the two classIds identically.
+  birolho2: {
+    id: "birolho2",
+    name: "Birolho2",
+    role: "Abominação",
+    hp: 78,
+    atk: 12,
+    mag: 0,
+    def: 4,
+    res: 4,
+    mov: 3,
+    minRange: 1,
+    maxRange: 1,
+    sprite: "birolho2",
+    size: 4,
+    footprintOffsets: FOOTPRINT_TYPE_7,
+    init: 6,
+  },
   cultist: {
     id: "cultist",
     name: "Feiticeiro",
@@ -754,6 +774,25 @@ export const CLASSES: Record<ClassId, ClassDef> = {
     minRange: 1,
     maxRange: 2,
     sprite: "lancer",
+    size: 1,
+    init: 4,
+  },
+  // Aldric's own hero class — same kit as CLASSES.lancer (he *was* a generic Lanceiro
+  // stat-wise), split off so his own "aldric" sprite doesn't overwrite the plain enemy
+  // Lancer look, which stays on classId "lancer" for maps that already spawn it.
+  aldric: {
+    id: "aldric",
+    name: "Aldric",
+    role: "Pique",
+    hp: 26,
+    atk: 8,
+    mag: 0,
+    def: 4,
+    res: 3,
+    mov: 5,
+    minRange: 1,
+    maxRange: 2,
+    sprite: "aldric",
     size: 1,
     init: 4,
   },
@@ -1041,6 +1080,7 @@ export const GROWTH: Record<ClassId, { hp: number; atk: number; mag: number; def
   morvenianWolf: { hp: 4, atk: 2, mag: 0, def: 2, res: 1 },
   butcher: { hp: 4, atk: 2, mag: 0, def: 2, res: 1 },
   birolho: { hp: 4, atk: 2, mag: 0, def: 2, res: 2 },
+  birolho2: { hp: 4, atk: 2, mag: 0, def: 2, res: 2 },
   cultist: { hp: 3, atk: 0, mag: 2, def: 1, res: 2 },
   horror: { hp: 4, atk: 2, mag: 0, def: 2, res: 2 },
   asherah: { hp: 5, atk: 2, mag: 0, def: 2, res: 2 },
@@ -1052,6 +1092,7 @@ export const GROWTH: Record<ClassId, { hp: number; atk: number; mag: number; def
   assassin: { hp: 3, atk: 3, mag: 0, def: 1, res: 1 },
   rogue: { hp: 3, atk: 2, mag: 0, def: 1, res: 1 },
   lancer: { hp: 4, atk: 2, mag: 0, def: 2, res: 1 },
+  aldric: { hp: 4, atk: 2, mag: 0, def: 2, res: 1 },
   sandoval: { hp: 5, atk: 3, mag: 0, def: 2, res: 1 },
   kaelFinal: { hp: 4, atk: 2, mag: 0, def: 2, res: 1 },
   kaelEarly: { hp: 4, atk: 2, mag: 0, def: 2, res: 1 },
@@ -1082,25 +1123,23 @@ export const MAX_LEVEL = 30;
 export const EXP_TO_LEVEL = 100;
 
 /** XP a hit, heal, or potion lands when attacker and target are the same level. */
-export const BASE_EXP_PER_HIT = 20;
+export const BASE_EXP_PER_HIT = 15;
 
-/** Level gap at which XP falls all the way to its floor (see expForHit) — beyond this,
- * still worth something, just never less. */
-const EXP_FALLOFF_LEVELS = 10;
+/** Flat XP adjustment per level of gap between target and attacker — see expForHit. */
+const EXP_LEVEL_GAP_ADJUST = 2;
 
 /**
  * XP granted for a single qualifying action (a damaging hit, a heal, a potion — anything
- * that calls gainExp). Fighting your own level or below always pays the full
- * BASE_EXP_PER_HIT; fighting below your weight class tapers that off linearly down to a
- * floor of 1 once the level gap reaches EXP_FALLOFF_LEVELS — e.g. a level 15 attacking a
- * level 5 (a 10-level gap) gains 1, a level 1 attacking a level 1 gains the full 20. Never
- * drops to 0: a hit always earns something, however outmatched the target.
+ * that calls gainExp). Fixed linear model, no diminishing curve and no cap: every level the
+ * TARGET outranks the attacker adds EXP_LEVEL_GAP_ADJUST XP (fighting up pays more), and
+ * every level the attacker outranks the target subtracts the same, down to a floor of 1 so
+ * an action never earns nothing. E.g. a level 5 attacker vs. a level 15 target (+10 gap)
+ * earns 35; the same fight from the other side (-10 gap, past the -7 point where the floor
+ * kicks in) earns 1.
  */
 export function expForHit(attackerLevel: number, defenderLevel: number): number {
-  const gap = Math.max(0, attackerLevel - defenderLevel);
-  if (gap >= EXP_FALLOFF_LEVELS) return 1;
-  const t = gap / EXP_FALLOFF_LEVELS;
-  return Math.round(BASE_EXP_PER_HIT - (BASE_EXP_PER_HIT - 1) * t);
+  const gap = defenderLevel - attackerLevel;
+  return Math.max(1, BASE_EXP_PER_HIT + EXP_LEVEL_GAP_ADJUST * gap);
 }
 
 /** Every class flagged as a summon (see ClassDef.summon) — the Familiar today, and
@@ -1111,6 +1150,20 @@ export const SUMMON_CLASSES: ClassId[] = (Object.keys(CLASSES) as ClassId[]).fil
 
 export function isBossClass(classId: ClassId): boolean {
   return !!CLASSES[classId]?.boss;
+}
+
+/** Kael's own story-progress variants — not a class choice, so they never belong next to
+ * an actual playable class name in a hint (see equipmentTooltip/weaponTooltip). Every
+ * *_TRIO usableBy group still lists them for real, so whoever's actually playing as Kael
+ * at that point in the story can still equip the gear — this only hides the redundant
+ * name from what the player reads. */
+const NON_PLAYABLE_DISPLAY_CLASSES: ReadonlySet<ClassId> = new Set(["kaelFinal", "kaelEarly"]);
+
+/** Whether a class belongs in a player-facing "who can use this" list — excludes bosses
+ * (e.g. Sandoval) and Kael's internal story variants, which are real usableBy entries for
+ * gameplay but never a name a player should see listed as if it were a class of its own. */
+export function isPlayableClassForDisplay(classId: ClassId): boolean {
+  return !isBossClass(classId) && !NON_PLAYABLE_DISPLAY_CLASSES.has(classId);
 }
 
 export function isSummonClass(classId: ClassId): boolean {
@@ -1351,7 +1404,7 @@ const ARCANE_ALL: ClassId[] = [...ARCANE_MAGE_TRIO, ...ARCANE_CONJURER_TRIO];
 const HEAL_TRIO: ClassId[] = ["healer", "bishop", "cleric"];
 const WARRIOR_TRIO: ClassId[] = ["swordsman", "kaelFinal", "kaelEarly", "paladin", "heavyKnight"];
 const ARCHER_TRIO: ClassId[] = ["archer", "ranger", "assassin"];
-const LANCER_TRIO: ClassId[] = ["lancer", "sandoval", "sentinel", "templar"];
+const LANCER_TRIO: ClassId[] = ["lancer", "aldric", "sandoval", "sentinel", "templar"];
 // Light armor: scouts, the warrior line, the lancer line, and the rogue. Front-liners
 // still wear mail/plate — leather is the lighter option (often +mov), not a scout exclusive.
 const LEATHER_WEARERS: ClassId[] = [...ARCHER_TRIO, ...WARRIOR_TRIO, ...LANCER_TRIO, "rogue"];
@@ -1695,8 +1748,9 @@ export function equipmentTooltip(it: EquipmentDef): string {
   if (stats) lines.push(stats);
   if (it.kind === "shield") lines.push(`Investida de Escudo · ${Math.round((it.dmgMul ?? 0.75) * 100)}% dano · 70% atordoa`);
   if (it.kind === "weapon") lines.push(`${it.dice}D${it.faces}${it.bonus ? `+${it.bonus}` : ""} · Mão secundária`);
-  if (it.usableBy && it.usableBy.length > 0) {
-    lines.push(`Usável: ${it.usableBy.map((c) => CLASSES[c]?.name ?? c).join(", ")}`);
+  const usableByPlayable = it.usableBy?.filter(isPlayableClassForDisplay) ?? [];
+  if (usableByPlayable.length > 0) {
+    lines.push(`Usável: ${usableByPlayable.map((c) => CLASSES[c]?.name ?? c).join(", ")}`);
   }
   if (it.price) lines.push(`${it.price} Ember`);
   return lines.join("\n");
@@ -1706,7 +1760,7 @@ export function weaponTooltip(w: WeaponDef, enh = 0): string {
   const lines = [`${w.name}${enh > 0 ? ` +${enh}` : ""}`, `${weaponDiceLabel(w.id)} · ${weaponRangeLabel(w.id)}`, "Espaço: Mão principal"];
   if (w.twoHanded) lines.push("Duas mãos");
   if (w.ranged) lines.push("À distância");
-  if (w.bonusClass) lines.push(`+10% dano · ${CLASSES[w.bonusClass]?.name ?? w.bonusClass}`);
+  if (w.bonusClass && isPlayableClassForDisplay(w.bonusClass)) lines.push(`+10% dano · ${CLASSES[w.bonusClass]?.name ?? w.bonusClass}`);
   if (w.price) lines.push(`${w.price} Ember`);
   return lines.join("\n");
 }
@@ -1784,6 +1838,7 @@ export const EMBER_DROP: Partial<Record<ClassId, number>> = {
   morvenianWolf: 3,
   butcher: 5,
   birolho: 9,
+  birolho2: 9,
   swampBlueCalf: 2,
   cultist: 4,
   captain: 6,
@@ -2276,15 +2331,17 @@ const ENEMY_MAGE_IDS: ReadonlySet<ClassId> = new Set([
   "sorcerer",
   "necromancer",
   "birolho",
+  "birolho2",
 ]);
 
 export function isEnemyMageClass(id: ClassId): boolean {
   return ENEMY_MAGE_IDS.has(id);
 }
 
-/** Choque charges spawned on an enemy mage. Birolho gets 3; every other mage gets 2. */
+/** Choque charges spawned on an enemy mage. Birolho (and Birolho2) get 3; every other mage
+ * gets 2. */
 export function shockChargesFor(classId: ClassId): number {
-  if (classId === "birolho") return 3;
+  if (classId === "birolho" || classId === "birolho2") return 3;
   if (isEnemyMageClass(classId)) return 2;
   return 0;
 }
@@ -2460,6 +2517,9 @@ const FULL_TABLE: number[][] = [
  *   Warrior     QUARTA — Paladin MEIA              · Heavy Knight QUARTA
  *   Archer      MEIA  — Ranger QUARTA             · Assassin MEIA
  *   Lancer      QUARTA — Sentinel QUARTA           · Templar MEIA
+ *   Aldric      QUARTA — Sentinel QUARTA           · Templar MEIA (same kit as Lancer;
+ *                                                     see PROMOTIONS, only Aldric's own
+ *                                                     classId carries the promotion path)
  */
 const CLASS_TIER_TABLE: Partial<Record<ClassId, number[][]>> = {
   mage: FULL_TABLE,
@@ -2468,6 +2528,7 @@ const CLASS_TIER_TABLE: Partial<Record<ClassId, number[][]>> = {
   swordsman: QUARTER_TABLE,
   archer: HALF_TABLE,
   lancer: QUARTER_TABLE,
+  aldric: QUARTER_TABLE,
   elementalist: FULL_TABLE,
   warlock: HALF_TABLE,
   sorcerer: FULL_TABLE,
@@ -2492,7 +2553,7 @@ export const PROMOTIONS: Partial<Record<ClassId, [ClassId, ClassId]>> = {
   healer: ["cleric", "bishop"],
   swordsman: ["paladin", "heavyKnight"],
   archer: ["ranger", "assassin"],
-  lancer: ["sentinel", "templar"],
+  aldric: ["sentinel", "templar"],
 };
 
 /** Reverse of PROMOTIONS: promoted ClassId → its base ClassId. Lets anything keyed on
@@ -2740,7 +2801,7 @@ const RAW_MISSIONS: Mission[] = [
       { name: "Kael", classId: "swordsman", x: 2, y: 6 },
       { name: "Neera", classId: "archer", x: 3, y: 6 },
       { name: "Voss", classId: "mage", x: 4, y: 6 },
-      { name: "Aldric", classId: "lancer", x: 1, y: 6 },
+      { name: "Aldric", classId: "aldric", x: 1, y: 6 },
       { name: "Malrec", classId: "conjurer", x: 5, y: 6 },
     ],
     enemySpawns: [

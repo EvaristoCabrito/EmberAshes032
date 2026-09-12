@@ -1,11 +1,13 @@
 import { type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, Dices, Grip, Pencil, RotateCcw, Shield, Shuffle, Swords, Volume2, VolumeX, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { loadGameArt, TILE_VARIANT_COUNT, tileVariantName, tileVariantSrc } from "./assets";
+import { loadGameArt, portraitFor, TILE_VARIANT_COUNT, tileVariantName, tileVariantSrc } from "./assets";
 import { installAudioUnlock, playFile, playMenuMusic, playTheme, resumeAudio, setMuted, sfxPlay, stopMusic, unlockAudio } from "./audio";
 import { BattleCanvas } from "./BattleCanvas";
 import { InnScreen } from "./InnScreen";
 import { PartyInventoryOverlay, ItemTip } from "./InventoryScreens";
+import { DialogOverlay } from "./DialogOverlay";
+import { DialogEditor } from "./DialogEditor";
 import { CAUSTIC_VENOM, CHEST_LOOT, CLASSES, CLEAVE, cleaveFormula, CURE_DISEASE, CURES, DECORATIONS, DOUBLE_STRIKE, doubleStrikeFormula, EQUIPMENT, EXP_TO_LEVEL, FIREBALL, formatSpellUseGains, KILL_DROP_CHANCE, LIGHTNING, LIGHTNING_T3, LONG_SHOT, longShotFormula, MAGIC_MISSILE, PIERCING, piercingMul, PIERCING_THRUST, MAX_GRID, MAX_LEVEL, MIN_GRID, POTIONS, POTION_LOOT_WEIGHT, PROMOTE_LEVEL, PROMOTED_BASE, PROMOTIONS, SHOCK, SUMMON_FAMILIAR, SWEEP, TRIP, TERRAIN, WEAPONS, WEAPON_MAX_ENH, WEB_OF_DREAMS, BAG_MAX, LOCKPICK_PRICE, POTION_CARRY_MAX, POTION_PRICE, barricadeDecor, decorationCells, placedFootprint, decorationImage, diceFormula, emberForKill, enemyLevelFor, equippedPouchId, fireballFormula, healFormula, lightningFormula, lightningTier3Formula, dressMap, isSummonClass, MUSIC_TRACKS, SUMMON_CLASSES, parseLayout, potionLabel, potionTooltip, lockpickTooltip, pouchIcon, rangeLabel, sheetLine, spellFormula, spellTier, spellUseGains, startingBags, statsFor, terrainNote, tierKey, tierUses, weaponEnhCost, weaponSellValue, equipmentFitsSlot, MULTI_SHOT, multiShotFormula, SECOND_WIND, secondWindPct, auraPower, AURA_OF_PROTECTION, INTIMIDATING_PRESENCE, DIVINE_WRATH, divineWrathPower, SHOULDER_SMASH, shoulderSmashFormula, STAMPEDE, stampedeFormula, type SpellTier } from "./data";
 import { BattleEngine } from "./engine";
 import { MapPreviewCanvas, type PreviewUnitSelection } from "./MapPreviewCanvas";
@@ -25,7 +27,7 @@ import {
   writeSlot,
   selectSlot,
 } from "./save";
-import type { BattleSnapshot, ClassId, DecorationPlacement, EquipSlot, GameArt, GrowthLine, HudSnapshot, Mission, PotionId, SaveBank, SaveData, ScreenId, SpellKind, Spawn, TerrainId, UnitPublic, WinCondition, WorldLocation } from "./types";
+import type { BattleSnapshot, ClassId, DecorationPlacement, DialogTree, EquipSlot, GameArt, GrowthLine, HudSnapshot, Mission, PotionId, SaveBank, SaveData, ScreenId, SpellKind, Spawn, SpriteId, TerrainId, UnitPublic, WinCondition, WorldLocation } from "./types";
 
 /** A map JSON write updates Vite's module list and can reload the app. This one-shot
  * snapshot restores the editor instead of sending the author to the title screen. */
@@ -134,6 +136,7 @@ function hudBlank(): HudSnapshot {
     turnQueue: [],
     log: [],
     chestLoot: null,
+    pendingDialog: null,
   };
 }
 
@@ -221,17 +224,6 @@ function briefArt(id: string): string | null {
   return BRIEF_ART[id] ?? null;
 }
 
-const HERO_PORTRAIT: Partial<Record<string, string>> = {
-  kael: "/game/portraits/kael.png?v=2",
-  nira: "/game/portraits/nira.png",
-  voss: "/game/portraits/voss.png",
-  salazar: "/game/portraits/salazar.png",
-  malrec: "/game/portraits/malrec.png",
-  aldric: "/game/portraits/aldric.png",
-  defaultLancer: "/game/portraits/aldric.png",
-  sandoval: "/game/portraits/sandoval-001.jpg?v=1",
-  conjurer: "/game/portraits/conjurer-002.png?v=2",
-};
 
 // Carried-bag icon follows the waist pouch equipped on that hero (small / large / satchel).
 const BAG_ICON = pouchIcon(null);
@@ -272,6 +264,7 @@ function classSpells(classId: ClassId): SpellKind[] {
       case "healer":
         return ["cureMinor", "cureWounds", "cureDisease"];
       case "lancer":
+      case "aldric":
         return ["piercingThrust", "sweep", "trip"];
       default:
         return [];
@@ -447,6 +440,11 @@ export function GameApp() {
   const [engine, setEngine] = useState<BattleEngine | null>(null);
   const [hud, setHud] = useState<HudSnapshot>(hudBlank);
   const [paused, setPaused] = useState(false);
+  // The mission's outro dialog (see hud.result effect below) — opens once, right when
+  // victory is confirmed, and never reopens after being closed even though hud.result
+  // stays "victory" for the rest of the battle.
+  const [outroDialogOpen, setOutroDialogOpen] = useState(false);
+  const outroDialogShownRef = useRef(false);
   const [help, setHelp] = useState(false);
   const [muted, setMutedUi] = useState(() => (typeof window === "undefined" ? false : loadBank().muted));
   const muteReady = useRef(false);
@@ -645,6 +643,8 @@ export function GameApp() {
       setMissionId(id);
       setHud(battle.getHud());
       setPaused(false);
+      outroDialogShownRef.current = false;
+      setOutroDialogOpen(false);
       setSlotMode(null);
       setScreen("battle");
     },
@@ -664,6 +664,12 @@ export function GameApp() {
 
   useEffect(() => {
     if (screen !== "battle" || !hud.result) return;
+    // The outro dialog fires once, exactly when victory is confirmed — never on defeat,
+    // and never more than once even though hud.result stays "victory" afterward.
+    if (hud.result === "victory" && mission?.outroDialog && mission.outroDialogEnabled !== false && !outroDialogShownRef.current) {
+      setOutroDialogOpen(true);
+      return;
+    }
     const t = window.setTimeout(() => {
       if (hud.result === "victory" && (missionId === "templo" || missionId === "portao")) {
         setScreen("epilogue");
@@ -672,7 +678,12 @@ export function GameApp() {
       if (hud.result) setScreen(hud.result);
     }, 1100);
     return () => window.clearTimeout(t);
-  }, [hud.result, screen, missionId]);
+  }, [hud.result, screen, missionId, mission, outroDialogOpen]);
+
+  const closeOutroDialog = useCallback(() => {
+    outroDialogShownRef.current = true;
+    setOutroDialogOpen(false);
+  }, []);
 
   const persistVictory = useCallback(() => {
     if (!engine || !mission) return;
@@ -1000,7 +1011,13 @@ export function GameApp() {
       )}
 
       {screen === "briefing" && mission && (
-        <BriefingScreen mission={mission} onBack={() => setScreen("worldMap")} onStart={beginMission} />
+        <BriefingScreen
+          mission={mission}
+          onBack={() => setScreen("worldMap")}
+          onStart={beginMission}
+          muted={muted}
+          onMute={() => setMutedUi((v) => !v)}
+        />
       )}
 
       {screen === "inn" && (
@@ -1146,6 +1163,8 @@ export function GameApp() {
           muted={muted}
           save={save}
           playtest={!!customMission}
+          outroDialogOpen={outroDialogOpen}
+          onCloseOutroDialog={closeOutroDialog}
           // Gear swapped during a fight is permanent, so it lands in the save the moment it
           // happens rather than waiting for a victory that may never come. `alsoOwn` marks a
           // piece that came out of a chest this battle: the engine has already removed it
@@ -1499,7 +1518,7 @@ const SKILL_SPEED_GROUPS: { label: string; classes: string; classId: ClassId; ma
   },
   {
     label: "Conjuração Lenta",
-    classes: ["swordsman", "lancer", "heavyKnight", "ranger", "sentinel"].map((c) => CLASSES[c as ClassId].name).join(", "),
+    classes: ["swordsman", "lancer", "aldric", "heavyKnight", "ranger", "sentinel"].map((c) => CLASSES[c as ClassId].name).join(", "),
     classId: "swordsman",
     maxTier: 6,
   },
@@ -2056,6 +2075,10 @@ function missionToDraft(m: Mission): MapDraft {
     playerSpawns: m.playerSpawns.map((s) => ({ ...s, level: DEFAULT_TEST_LEVEL })),
     enemySpawns: m.enemySpawns.map((s) => ({ ...s, level: enemyLevelFor(m.index) })),
     neutralSpawns: (m.neutralSpawns ?? []).map((s) => ({ ...s, level: enemyLevelFor(m.index) })),
+    introDialog: m.introDialog,
+    introDialogEnabled: m.introDialogEnabled,
+    outroDialog: m.outroDialog,
+    outroDialogEnabled: m.outroDialogEnabled,
   };
 }
 
@@ -2104,7 +2127,7 @@ const SPAWN_GROUPS: { side: SpawnKey; summon: boolean; label: string }[] = [
  * so widening the editor's reach does not quietly recruit them into a campaign. */
 const EDITOR_HEROES: { name: string; classId: ClassId }[] = [
   ...DEFAULT_HEROES,
-  { name: "Aldric", classId: "lancer" },
+  { name: "Aldric", classId: "aldric" },
   { name: "Malrec", classId: "conjurer" },
 ];
 
@@ -2407,6 +2430,9 @@ function MapEditorScreen({
   // real edit instead.
   const [previewMission, setPreviewMission] = useState<Mission | null>(null);
   const [selectedPreviewUnit, setSelectedPreviewUnit] = useState<PreviewUnitSelection | null>(null);
+  /** Which DialogTree the DialogEditor modal is currently open for, if any — the mission's
+   * own intro/outro, or one neutral spawn's own conversation. */
+  const [dialogEditorTarget, setDialogEditorTarget] = useState<{ kind: "intro" } | { kind: "outro" } | { kind: "spawn"; index: number } | null>(null);
   const [shuffleExclude, setShuffleExclude] = useState<Set<string>>(() => new Set(loadDecoShuffleExclude()));
   const toggleShuffleExclude = (id: string) => {
     setShuffleExclude((prev) => {
@@ -3207,6 +3233,20 @@ function MapEditorScreen({
   // search in a dropdown. pt-BR collation so accents and case sort where a reader expects.
   const classOptions = (Object.keys(CLASSES) as ClassId[]).sort((a, b) => byName(CLASSES[a].name, CLASSES[b].name));
   const summonOptions = [...SUMMON_CLASSES].sort((a, b) => byName(CLASSES[a].name, CLASSES[b].name));
+  // One entry per distinct sprite (several classes share art — a promoted class, an
+  // alternate skin), labeled by whichever class name reaches it first in the sorted list,
+  // for the dialog editor's portrait picker.
+  const portraitOptions = (() => {
+    const seen = new Set<SpriteId>();
+    const out: { id: SpriteId; label: string }[] = [];
+    for (const c of classOptions) {
+      const sprite = CLASSES[c].sprite;
+      if (seen.has(sprite)) continue;
+      seen.add(sprite);
+      out.push({ id: sprite, label: CLASSES[c].name });
+    }
+    return out;
+  })();
   const decorOptions = Object.values(DECORATIONS).sort((a, b) => byName(a.name, b.name));
   const decorationSectionFor = (id: string) => {
     if (id.startsWith("wilds-")) return "Wilds";
@@ -3417,6 +3457,38 @@ function MapEditorScreen({
               onChange={(e) => setDraft((d) => ({ ...d, briefing: e.target.value }))}
             />
           </label>
+          <div className="flex flex-col gap-1">
+            <span className="text-muted text-xs uppercase tracking-wide">Diálogo de abertura</span>
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs shrink-0">
+                <input
+                  type="checkbox"
+                  checked={draft.introDialogEnabled !== false}
+                  onChange={(e) => setDraft((d) => ({ ...d, introDialogEnabled: e.target.checked }))}
+                />
+                Ativado
+              </label>
+              <Button size="sm" variant="quiet" onClick={() => setDialogEditorTarget({ kind: "intro" })}>
+                {draft.introDialog ? "Editar diálogo" : "Criar diálogo"}
+              </Button>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-muted text-xs uppercase tracking-wide">Diálogo de encerramento</span>
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs shrink-0">
+                <input
+                  type="checkbox"
+                  checked={draft.outroDialogEnabled !== false}
+                  onChange={(e) => setDraft((d) => ({ ...d, outroDialogEnabled: e.target.checked }))}
+                />
+                Ativado
+              </label>
+              <Button size="sm" variant="quiet" onClick={() => setDialogEditorTarget({ kind: "outro" })}>
+                {draft.outroDialog ? "Editar diálogo" : "Criar diálogo"}
+              </Button>
+            </div>
+          </div>
           <label className="flex flex-col gap-1">
             <span className="text-muted text-xs uppercase tracking-wide">Vitória</span>
             <select
@@ -3787,7 +3859,10 @@ function MapEditorScreen({
                 value={summonBrush}
                 onChange={(e) => setSummonBrush(e.target.value as ClassId)}
               >
-                {summonOptions.map((c) => (
+                {/* Neutral is also how an NPC gets placed (see the "Diálogo" button on its
+                    spawn row below) — a talkable character can be any class, not just the
+                    ones flagged as summons, so the picker widens for that side only. */}
+                {(summonSide === "neutral" ? classOptions : summonOptions).map((c) => (
                   <option key={c} value={c}>
                     {CLASSES[c].name} · {CLASSES[c].role}
                   </option>
@@ -3804,7 +3879,7 @@ function MapEditorScreen({
                 ? "Aliadas não contam na derrota — perder todas não perde a missão."
                 : summonSide === "enemy"
                   ? "Inimigas contam pra limpar o mapa, como qualquer inimigo."
-                  : "Neutras ficam paradas: não entram na ordem de turno e não contam pra limpar o mapa. Atacar uma acorda o bando inteiro da mesma classe, que vira inimigo e passa a agir na rodada seguinte. Não tem volta."}
+                  : "Neutras ficam paradas: não entram na ordem de turno e não contam pra limpar o mapa. Atacar uma acorda o bando inteiro da mesma classe, que vira inimigo e passa a agir na rodada seguinte — a menos que ela tenha um Diálogo (veja a lista de unidades abaixo): aí não pode ser atacada, e clicar nela conversa em vez de brigar."}
             </p>
           </div>
         )}
@@ -4061,6 +4136,16 @@ function MapEditorScreen({
                     title="Sortear uma classe inimiga aleatória"
                   >
                     <Shuffle className="size-3.5" />
+                  </button>
+                )}
+                {side === "neutralSpawns" && (
+                  <button
+                    type="button"
+                    onClick={() => setDialogEditorTarget({ kind: "spawn", index: i })}
+                    className="text-xs text-muted hover:text-fg px-1.5 border border-border rounded-md shrink-0"
+                    title="Editar o diálogo desta unidade"
+                  >
+                    {s.dialog ? "Diálogo" : "+ Diálogo"}
                   </button>
                 )}
                 <button type="button" onClick={() => removeSpawn(side, i)} className="text-danger px-1.5" aria-label="Remover">
@@ -4402,6 +4487,31 @@ function MapEditorScreen({
         </div>
       )}
 
+      {dialogEditorTarget && (
+        <DialogEditor
+          title={
+            dialogEditorTarget.kind === "intro"
+              ? "Diálogo de abertura"
+              : dialogEditorTarget.kind === "outro"
+                ? "Diálogo de encerramento"
+                : `Diálogo — ${draft.neutralSpawns?.[dialogEditorTarget.index]?.name ?? "unidade"}`
+          }
+          tree={
+            dialogEditorTarget.kind === "intro"
+              ? draft.introDialog
+              : dialogEditorTarget.kind === "outro"
+                ? draft.outroDialog
+                : draft.neutralSpawns?.[dialogEditorTarget.index]?.dialog
+          }
+          onChange={(tree) => {
+            if (dialogEditorTarget.kind === "intro") setDraft((d) => ({ ...d, introDialog: tree }));
+            else if (dialogEditorTarget.kind === "outro") setDraft((d) => ({ ...d, outroDialog: tree }));
+            else updateSpawn("neutralSpawns", dialogEditorTarget.index, { dialog: tree });
+          }}
+          onClose={() => setDialogEditorTarget(null)}
+          portraitOptions={portraitOptions}
+        />
+      )}
     </section>
   );
 }
@@ -4469,10 +4579,14 @@ function BriefingScreen({
   mission,
   onBack,
   onStart,
+  muted,
+  onMute,
 }: {
   mission: (typeof ALL_MISSIONS)[number];
   onBack: () => void;
   onStart: () => void;
+  muted: boolean;
+  onMute: () => void;
 }) {
   const art = briefArt(mission.id);
   return (
@@ -4487,10 +4601,18 @@ function BriefingScreen({
         <button type="button" onClick={onBack} className="size-10 grid place-items-center rounded-md border border-border bg-surface/90" aria-label="Voltar">
           <ChevronLeft className="size-5" />
         </button>
-        <div>
+        <div className="flex-1">
           <p className="text-sm uppercase tracking-[0.18em] text-muted">{mission.place}</p>
           <h1 className="font-display text-3xl leading-none">{mission.title}</h1>
         </div>
+        <button
+          type="button"
+          onClick={onMute}
+          className="size-10 grid place-items-center rounded-md border border-border bg-surface/90 text-fg"
+          aria-label={muted ? "Ativar som" : "Silenciar"}
+        >
+          {muted ? <VolumeX className="size-5" /> : <Volume2 className="size-5" />}
+        </button>
       </header>
       <div className="relative z-10 flex-1 min-h-0 overflow-y-auto px-4 pb-4 sm:px-6">
         <div className="max-w-xl rounded-xl border border-border bg-surface/90 p-5 shadow-lg shadow-bg/30">
@@ -4525,6 +4647,8 @@ function BattleScreen({
   onQuit,
   onEquipWeapon,
   onEquipItem,
+  outroDialogOpen,
+  onCloseOutroDialog,
   playtest = false,
 }: {
   engine: BattleEngine;
@@ -4542,6 +4666,10 @@ function BattleScreen({
   /** Persist a mid-battle gear change. `alsoOwn` is true when the item came out of a chest
    * this battle and therefore is not in the save's owned lists yet. */
   onEquipWeapon?: (hero: string, weaponId: string, alsoOwn: boolean) => void;
+  /** Owned by the parent (GameApp) because it also gates the leave-battle transition once
+   * victory is confirmed — see the hud.result effect there. */
+  outroDialogOpen: boolean;
+  onCloseOutroDialog: () => void;
   onEquipItem?: (hero: string, slot: EquipSlot, itemId: string | null, alsoOwn: boolean) => void;
   /** True while running a map from the editor, which exits back to it rather than quitting. */
   playtest?: boolean;
@@ -4563,6 +4691,13 @@ function BattleScreen({
   // Resets whenever the field freshly clears again (a trap/trigger spawn dealt with),
   // rather than staying dismissed for the rest of the battle.
   const [winPopupDismissed, setWinPopupDismissed] = useState(false);
+  // The "Primeira batalha" orientation hint below — stays up until tapped, since it was
+  // pointer-events-none and had no way to dismiss it at all.
+  const [firstBattleHintDismissed, setFirstBattleHintDismissed] = useState(false);
+  // The mission's intro dialog — lazy-init so it only ever opens once, right as this screen
+  // first mounts (a fresh mount happens per battle: see BattleEngine construction in
+  // startBattle), never on a re-render.
+  const [introDialogOpen, setIntroDialogOpen] = useState(() => !!engine.mission.introDialog && engine.mission.introDialogEnabled !== false);
   const wasWinAvailable = useRef(false);
   useEffect(() => {
     if (hud.winAvailable && !wasWinAvailable.current) setWinPopupDismissed(false);
@@ -4748,7 +4883,12 @@ function BattleScreen({
   return (
     <section className="relative h-dvh min-h-0 flex flex-col bg-bg">
       <div className="relative flex-1 min-h-0">
-        <BattleCanvas engine={engine} onHud={onHud} paused={paused} onTileReadout={setHeldTile} />
+        <BattleCanvas
+          engine={engine}
+          onHud={onHud}
+          paused={paused || introDialogOpen || outroDialogOpen || !!hud.pendingDialog}
+          onTileReadout={setHeldTile}
+        />
         {hud.turnQueue.length > 1 && (
           <div className="pointer-events-none absolute inset-x-2 top-[max(0.5rem,env(safe-area-inset-top))] flex items-center gap-1 flex-wrap">
             <p className="bg-surface/90 border border-border rounded-md px-2 py-0.5 text-[15px] leading-tight flex items-center gap-1.5 flex-wrap">
@@ -4883,13 +5023,23 @@ function BattleScreen({
             </div>
           </div>
         )}
+        {introDialogOpen && engine.mission.introDialog && (
+          <DialogOverlay tree={engine.mission.introDialog} onClose={() => setIntroDialogOpen(false)} />
+        )}
+        {hud.pendingDialog && <DialogOverlay tree={hud.pendingDialog} onClose={() => engine.acknowledgeDialog()} />}
+        {outroDialogOpen && engine.mission.outroDialog && <DialogOverlay tree={engine.mission.outroDialog} onClose={onCloseOutroDialog} />}
       </div>
 
-      {engine.mission.id === "vau" && !playtest && (
-        <aside className="pointer-events-none absolute z-20 inset-x-3 bottom-28 sm:bottom-32 flex justify-center" aria-label="Orientação inicial">
-          <p className="max-w-md rounded-lg border border-accent/60 bg-surface/95 px-3 py-2 text-center text-xs leading-relaxed text-fg shadow-lg">
+      {engine.mission.id === "vau" && !playtest && !firstBattleHintDismissed && (
+        <aside className="absolute z-20 inset-x-3 bottom-28 sm:bottom-32 flex justify-center" aria-label="Orientação inicial">
+          <button
+            type="button"
+            onClick={() => setFirstBattleHintDismissed(true)}
+            className="max-w-md rounded-lg border border-accent/60 bg-surface/95 px-3 py-2 text-center text-xs leading-relaxed text-fg shadow-lg"
+          >
             <span className="font-medium text-accent">Primeira batalha:</span> clique no retrato para abrir status e equipamento. Clique na barra de HP para abrir o log de combate.
-          </p>
+            <span className="block mt-1 text-[10px] uppercase tracking-wide text-muted">Toque para fechar</span>
+          </button>
         </aside>
       )}
 
@@ -4904,13 +5054,9 @@ function BattleScreen({
                 title="Abrir status e equipamento" aria-label="Abrir status e equipamento"
               >
                 <img
-                  src={HERO_PORTRAIT[unit.sprite] ?? `/game/sprites/${unit.sprite}/1.png`}
+                  src={portraitFor(unit.sprite).src}
                   alt=""
-                  className={
-                    HERO_PORTRAIT[unit.sprite]
-                      ? "h-16 w-12 sm:h-20 sm:w-14 object-cover rounded-md"
-                      : "h-14 w-14 object-contain"
-                  }
+                  className={portraitFor(unit.sprite).framed ? "h-16 w-12 sm:h-20 sm:w-14 object-cover rounded-md" : "h-14 w-14 object-contain"}
                 />
               </button>
               <button
@@ -4961,7 +5107,7 @@ function BattleScreen({
                     </div>
                     <p className="text-[11px] tabular-nums text-muted leading-snug">
                       {hud.forecast && foe
-                        ? `${hud.forecast.dmgOut} em ${foe.name}${hud.forecast.canCounter ? ` · contra ${hud.forecast.dmgBack}` : " · sem contra"}${hud.forecast.kill ? " · abate" : ""}`
+                        ? `${hud.forecast.hitOut}% · ${hud.forecast.dmgOut} em ${foe.name}${hud.forecast.canCounter ? ` · contra ${hud.forecast.hitBack}% · ${hud.forecast.dmgBack}` : " · sem contra"}${hud.forecast.kill ? " · abate" : ""}`
                         : sheetLine(unit)}
                     </p>
                   </>
@@ -5269,7 +5415,7 @@ function StatusPanel({ unit, bagIcon, onClose, onOpenInventory, onOpenEquipment 
   const healer = base === "healer";
   const archer = base === "archer";
   const swordsman = base === "swordsman";
-  const lancer = base === "lancer";
+  const lancer = base === "lancer" || base === "aldric";
 
   return (
     <div
@@ -5281,15 +5427,16 @@ function StatusPanel({ unit, bagIcon, onClose, onOpenInventory, onOpenEquipment 
       <div className="w-full max-w-md max-h-[88dvh] overflow-y-auto bg-surface border border-border rounded-xl p-5">
         <div className="flex items-start justify-between gap-3 mb-4">
           <div className="flex items-center gap-3 min-w-0">
-            <img
-              src={HERO_PORTRAIT[unit.sprite] ?? `/game/sprites/${unit.sprite}/1.png`}
-              alt=""
-              className={
-                HERO_PORTRAIT[unit.sprite]
-                  ? "h-24 w-20 object-cover rounded-lg border border-border shrink-0"
-                  : "h-20 w-20 object-contain shrink-0"
-              }
-            />
+            <div className="flex flex-col items-center gap-1 shrink-0">
+              <img
+                src={portraitFor(unit.sprite).src}
+                alt=""
+                className={portraitFor(unit.sprite).framed ? "h-24 w-20 object-cover rounded-lg border border-border" : "h-20 w-20 object-contain"}
+              />
+              {/* Class shown right under the portrait too — a fixed anchor point for
+                  when a class change swaps this label without moving the name/level line. */}
+              <p className="text-[10px] text-muted text-center leading-none max-w-20 truncate">{unit.className}</p>
+            </div>
             <div className="min-w-0">
               <p className="font-display text-xl leading-tight truncate">{unit.name}</p>
               <p className={`text-xs ${unit.side === "enemy" ? "text-danger" : "text-muted"}`}>

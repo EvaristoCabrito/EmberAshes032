@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { ChevronLeft, Volume2, VolumeX } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { BAG_MAX, CLASSES, HERO_NAMES, LOCKPICK_PRICE, POTION_CARRY_MAX, POTION_PRICE, WEAPON_MAX_ENH, WEAPONS, heroRecruited, lockpickTooltip, partyPouchId, potionTooltip, pouchIcon, weaponDiceLabel, weaponEnhCost, weaponIcon, weaponPower, weaponRangeLabel, weaponSellValue, weaponTooltip, weaponsForClass, potionLabel } from "./data";
+import { BAG_MAX, CLASSES, HERO_NAMES, LOCKPICK_PRICE, POTION_CARRY_MAX, POTION_PRICE, WEAPON_MAX_ENH, WEAPONS, heroRecruited, isPlayableClassForDisplay, lockpickTooltip, partyPouchId, potionTooltip, pouchIcon, weaponDiceLabel, weaponEnhCost, weaponIcon, weaponPower, weaponRangeLabel, weaponSellValue, weaponTooltip, weaponsForClass, potionLabel } from "./data";
 import { ItemTip, PartyInventoryOverlay } from "./InventoryScreens";
 import type { Bag, ClassId, EquipSlot, PotionId, SaveData } from "./types";
 
@@ -486,7 +486,7 @@ function SmithPanel({
                           {weaponDiceLabel(w.id)} · {weaponRangeLabel(w.id)}
                         </span>
                         <span className="block text-[10px] uppercase tracking-wide text-muted">Mão principal</span>
-                        {w.bonusClass && (
+                        {w.bonusClass && isPlayableClassForDisplay(w.bonusClass) && (
                           <span
                             className={`block text-[11px] tabular-nums ${w.bonusClass === classId ? "text-accent" : "text-muted"}`}
                           >
@@ -521,7 +521,7 @@ function SmithPanel({
                           {weaponDiceLabel(w.id)} · {weaponRangeLabel(w.id)} · {w.price} Ember
                         </span>
                         <span className="block text-[10px] uppercase tracking-wide text-muted">Mão principal</span>
-                        {w.bonusClass && (
+                        {w.bonusClass && isPlayableClassForDisplay(w.bonusClass) && (
                           <span
                             className={`block text-[11px] tabular-nums ${w.bonusClass === classId ? "text-accent" : "text-muted"}`}
                           >

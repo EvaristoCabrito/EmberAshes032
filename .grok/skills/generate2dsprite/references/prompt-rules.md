@@ -56,6 +56,30 @@ When using a layout guide, pass the guide PNG's sandbox path to `imagine_image_t
 
 Keep the creative prompt agent-written. The layout guide only provides geometry; it must not replace the action plan, art style, identity lock, or containment rules.
 
+## Master Character Framing (multi-class rosters)
+
+When the request is one class/character out of a roster meant to share one
+human scale (playable classes, party members), state in the prompt:
+
+- identical human scale to the rest of the roster — same head-to-boots
+  proportional height, same shoulder-width reference
+- full body visible, boots to head
+- same camera distance and focal perspective as the rest of the roster (do
+  not vary angle class-to-class)
+- same ground baseline (feet-line) as the rest of the roster
+- extra canvas margin sized for this roster's widest equipment (long spear,
+  staff, bow, flowing cloak, cast FX), even if this particular class doesn't
+  carry one, so every class can share one crop/canvas size and nothing from
+  any class ever crosses the image boundary
+
+Never let postprocessing normalize scale from the total ink bounding box —
+that box includes whatever the character holds or wears, so a class with a
+long weapon reads smaller-bodied than one without. Process the roster's
+reference/master character first, then lock every other class to that same
+scale with `--locked-scale` (or `--reference-meta` pointing at the master's
+`pipeline-meta.json`) instead of letting `generate2dsprite.py` auto-fit each
+class's own bbox. See `game-character-consistency` § 6 for the full rule.
+
 ## Containment Rules
 
 For any sheet mode, say this explicitly when consistency matters:

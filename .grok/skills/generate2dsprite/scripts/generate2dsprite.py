@@ -617,21 +617,35 @@ def bbox_touches_edge(
 
 
 def center_single_sprite(
-    img: Image.Image, size: int, threshold: int, edge_threshold: int
-) -> Image.Image:
+    img: Image.Image,
+    size: int,
+    threshold: int,
+    edge_threshold: int,
+    locked_scale: float | None = None,
+) -> tuple[Image.Image, dict[str, object]]:
     cleaned = remove_bg_magenta(img.convert("RGBA"), threshold, edge_threshold)
     bbox = cleaned.getbbox()
     if bbox:
         cleaned = cleaned.crop(bbox)
     width, height = cleaned.size
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    info: dict[str, object] = {"bbox": list(bbox) if bbox else None, "locked_scale": locked_scale}
     if width > 0 and height > 0:
-        scale = min(size / width, size / height) * 0.9
+        # This bbox is the full ink extent (body + any held weapon/staff/cloak
+        # that touches it) — it is only the AUTO-FIT reference, never assumed
+        # to be "the body". Pass locked_scale (captured once from a roster's
+        # reference character) so a Lancer's spear doesn't shrink his body
+        # relative to a sword-and-board class with a tighter bbox.
+        auto_fit_scale = min(size / width, size / height) * 0.9
+        scale = locked_scale if locked_scale is not None else auto_fit_scale
+        info["auto_fit_scale"] = auto_fit_scale
+        info["scale_used"] = scale
         new_width = max(1, int(width * scale))
         new_height = max(1, int(height * scale))
         cleaned = cleaned.resize((new_width, new_height), Image.Resampling.LANCZOS)
         canvas.paste(cleaned, ((size - new_width) // 2, (size - new_height) // 2))
-    return canvas
+        info["output_size"] = [new_width, new_height]
+    return canvas, info
 
 
 def split_grid(
@@ -650,6 +664,7 @@ def split_grid(
     component_padding: int = 0,
     min_component_area: int = 1,
     edge_touch_margin: int = 0,
+    locked_scale: float | None = None,
 ) -> tuple[list[Image.Image], list[dict[str, object]]]:
     cleaned = remove_bg_magenta(img.convert("RGBA"), threshold, edge_threshold)
     width, height = cleaned.size
@@ -703,6 +718,16 @@ def split_grid(
                 }
             )
 
+    # NOTE ON SCALE: every bbox above (per-frame or "largest component") is the
+    # full ink extent of body + whatever it's holding/wearing — a Lancer's
+    # spear or a caster's staff/cloak widens or heightens that box same as a
+    # bigger body would. Auto-fitting scale to THAT box is exactly what makes
+    # a weapon-heavy class read smaller than a sword-and-board class at the
+    # same cell size. `locked_scale` breaks that coupling: capture it once
+    # from a roster's reference/master character (see `auto_fit_scale` in this
+    # function's metadata, or center_single_sprite's) and pass the same number
+    # into every other class in the roster so they all render at one shared
+    # body scale, regardless of each character's own bbox.
     common_scale = None
     if shared_scale:
         max_width = max((frame.size[0] for frame in cropped_frames), default=0)
@@ -715,9 +740,8 @@ def split_grid(
         frame_width, frame_height = frame.size
         canvas = Image.new("RGBA", (cell_size, cell_size), (0, 0, 0, 0))
         if frame_width > 0 and frame_height > 0:
-            scale = common_scale or (
-                min(cell_size / frame_width, cell_size / frame_height) * fit_scale
-            )
+            auto_fit_scale = min(cell_size / frame_width, cell_size / frame_height) * fit_scale
+            scale = locked_scale if locked_scale is not None else (common_scale or auto_fit_scale)
             new_width = max(1, int(frame_width * scale))
             new_height = max(1, int(frame_height * scale))
             frame = frame.resize((new_width, new_height), Image.Resampling.LANCZOS)
@@ -728,6 +752,8 @@ def split_grid(
             else:
                 paste_y = (cell_size - new_height) // 2
             canvas.paste(frame, (paste_x, paste_y))
+            frame_info[index]["auto_fit_scale"] = auto_fit_scale
+            frame_info[index]["scale_used"] = scale
             frame_info[index]["output_size"] = [new_width, new_height]
             frame_info[index]["paste_position"] = [paste_x, paste_y]
         else:
@@ -853,6 +879,39 @@ def cmd_build_prompt(args: argparse.Namespace) -> None:
     print(prompt_text)
 
 
+def resolve_locked_scale(args: argparse.Namespace) -> float | None:
+    """Master-framing scale lock: never derive a roster's shared scale from a
+    per-character bbox (that bbox includes whatever the character is
+    holding/wearing). --locked-scale wins outright; --reference-meta pulls the
+    number from a previously processed reference/master character instead."""
+    if args.locked_scale is not None:
+        return args.locked_scale
+    if args.reference_meta is None:
+        return None
+    if not args.reference_meta.exists():
+        raise ValueError(f"--reference-meta not found: {args.reference_meta}")
+    ref = json.loads(args.reference_meta.read_text(encoding="utf-8"))
+    if "frames" in ref:
+        frames = ref["frames"]
+        if args.reference_frame:
+            labels = ref.get("frame_labels") or []
+            try:
+                frame = frames[labels.index(args.reference_frame)]
+            except ValueError:
+                raise ValueError(
+                    f"--reference-frame '{args.reference_frame}' not found in "
+                    f"{args.reference_meta} (labels: {labels})"
+                )
+        else:
+            frame = next((f for f in frames if f.get("scale_used") is not None), None)
+        if frame is None or frame.get("scale_used") is None:
+            raise ValueError(f"No frame with scale_used found in {args.reference_meta}")
+        return float(frame["scale_used"])
+    if ref.get("scale_used") is not None:
+        return float(ref["scale_used"])
+    raise ValueError(f"No scale_used recorded in {args.reference_meta}")
+
+
 def cmd_process(args: argparse.Namespace) -> None:
     if args.target not in PROCESS_TARGETS:
         raise ValueError(
@@ -860,6 +919,7 @@ def cmd_process(args: argparse.Namespace) -> None:
         )
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    locked_scale = resolve_locked_scale(args)
 
     raw = Image.open(args.input).convert("RGBA")
     metadata = {
@@ -871,6 +931,8 @@ def cmd_process(args: argparse.Namespace) -> None:
         "threshold": args.threshold,
         "edge_threshold": args.edge_threshold,
         "duration": args.duration,
+        "locked_scale": locked_scale,
+        "reference_meta": str(args.reference_meta) if args.reference_meta else None,
     }
 
     has_custom_grid = args.rows is not None or args.cols is not None
@@ -913,6 +975,7 @@ def cmd_process(args: argparse.Namespace) -> None:
             component_padding=args.component_padding,
             min_component_area=args.min_component_area,
             edge_touch_margin=args.edge_touch_margin,
+            locked_scale=locked_scale,
         )
         if has_custom_grid:
             prefix = args.label_prefix or args.mode
@@ -957,9 +1020,12 @@ def cmd_process(args: argparse.Namespace) -> None:
             raise ValueError(f"Frames touch a cell edge: {metadata['edge_touch_frames']}")
     else:
         raw.save(out_dir / "raw.png")
-        centered = center_single_sprite(raw, args.single_size, args.threshold, args.edge_threshold)
+        centered, single_info = center_single_sprite(
+            raw, args.single_size, args.threshold, args.edge_threshold, locked_scale=locked_scale
+        )
         centered.save(out_dir / "clean.png")
         metadata["single_size"] = args.single_size
+        metadata.update(single_info)
 
     if args.prompt_file and args.prompt_file.exists():
         prompt_text = args.prompt_file.read_text(encoding="utf-8")
@@ -1012,6 +1078,35 @@ def build_parser() -> argparse.ArgumentParser:
     process_parser.add_argument("--reject-edge-touch", action="store_true")
     process_parser.add_argument("--single-size", type=int, default=256)
     process_parser.add_argument("--duration", type=int, default=200)
+    process_parser.add_argument(
+        "--locked-scale",
+        type=float,
+        help=(
+            "Use this exact px-scale instead of auto-fitting to each frame's own "
+            "ink bbox. Capture the number from a roster's reference/master "
+            "character (see auto_fit_scale in that run's pipeline-meta.json) and "
+            "reuse it for every other class so a wide bbox (long spear, staff, "
+            "cloak) doesn't shrink that class's body relative to the rest of the "
+            "roster. See --reference-meta for a one-step alternative."
+        ),
+    )
+    process_parser.add_argument(
+        "--reference-meta",
+        type=Path,
+        help=(
+            "Path to a prior pipeline-meta.json (usually the roster's master "
+            "character) to pull a locked scale from, instead of computing one "
+            "from this character's own bbox. Overridden by --locked-scale."
+        ),
+    )
+    process_parser.add_argument(
+        "--reference-frame",
+        help=(
+            "Frame label (e.g. 'idle-1') to read scale_used from inside "
+            "--reference-meta's frame list. Defaults to the first frame with a "
+            "recorded scale_used. Ignored for single-frame reference metadata."
+        ),
+    )
 
     return parser
 

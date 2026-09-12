@@ -1,7 +1,7 @@
 import { EQUIPMENT, EXP_TO_LEVEL, MAX_GRID, MAX_LEVEL, POTION_CARRY_MAX, BAG_MAX, PROMOTIONS, WEAPONS, emberFromCompleted, starterWeaponFor, startingBags } from "./data";
 import { ALL_MISSIONS } from "./mapstore";
 import { TIER_KEYS } from "./types";
-import type { Bag, BattleSnapshot, BattleUnitSnap, ClassId, EquipSlot, Phase, SaveBank, SaveData, Side, TerrainId, TierKey } from "./types";
+import type { Bag, BattleSnapshot, BattleUnitSnap, ClassId, DialogLine, DialogTree, EquipSlot, Phase, SaveBank, SaveData, Side, SpriteId, TerrainId, TierKey } from "./types";
 
 export const SLOT_COUNT = 5;
 export const SAVE_VERSION = 11;
@@ -176,6 +176,40 @@ function cleanBag(raw: unknown): Bag {
   };
 }
 
+/** A saved unit's dialog tree, or the pending one on a saved battle — validated loosely
+ * (unlike the stat fields above): a dangling next/startId reference just closes the popup
+ * early (see DialogOverlay's missing-line fallback) rather than anything that can corrupt
+ * combat state, so this only guards against the shape being outright wrong. */
+function cleanDialogTree(raw: unknown): DialogTree | null {
+  if (!raw || typeof raw !== "object") return null;
+  const t = raw as Record<string, unknown>;
+  if (typeof t.id !== "string" || typeof t.startId !== "string" || !Array.isArray(t.lines)) return null;
+  const lines: DialogLine[] = [];
+  for (const item of t.lines) {
+    if (!item || typeof item !== "object") continue;
+    const l = item as Record<string, unknown>;
+    if (typeof l.id !== "string" || typeof l.speaker !== "string" || typeof l.text !== "string") continue;
+    const replies = Array.isArray(l.replies)
+      ? (l.replies as unknown[]).flatMap((r) => {
+          if (!r || typeof r !== "object") return [];
+          const rr = r as Record<string, unknown>;
+          if (typeof rr.text !== "string") return [];
+          return [{ text: rr.text, next: typeof rr.next === "string" ? rr.next : null }];
+        })
+      : undefined;
+    lines.push({
+      id: l.id,
+      speaker: l.speaker,
+      text: l.text,
+      portrait: typeof l.portrait === "string" ? (l.portrait as SpriteId) : undefined,
+      next: typeof l.next === "string" ? l.next : null,
+      replies: replies && replies.length > 0 ? replies : undefined,
+    });
+  }
+  if (lines.length === 0) return null;
+  return { id: t.id, startId: t.startId, lines };
+}
+
 function cleanBattleUnit(raw: unknown): BattleUnitSnap | null {
   if (!raw || typeof raw !== "object") return null;
   const u = raw as Record<string, unknown>;
@@ -263,6 +297,7 @@ function cleanBattleUnit(raw: unknown): BattleUnitSnap | null {
     asleep: u.asleep === true,
     sleepTurns: clampInt(u.sleepTurns, 0, 20),
     guaranteedDrop: u.guaranteedDrop === true,
+    dialog: cleanDialogTree(u.dialog),
     moveBudgetUsed: clampInt(u.moveBudgetUsed, 0, 20),
   };
 }
@@ -350,6 +385,7 @@ function cleanBattle(raw: unknown, pendingMission: string | null): BattleSnapsho
     log: Array.isArray(b.log) ? (b.log as unknown[]).filter((line): line is string => typeof line === "string").slice(-200) : [],
     winAvailable: b.winAvailable === true,
     chestLoot,
+    pendingDialog: cleanDialogTree(b.pendingDialog),
     turnRestrained: b.turnRestrained === true,
     turnBegan: b.turnBegan !== false,
     // Carried through as an opaque string: the engine owns the packing and is the only

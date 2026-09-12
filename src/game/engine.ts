@@ -39,6 +39,7 @@ import type {
   TerrainDef,
   ClassId,
   DecorationPlacement,
+  DialogTree,
   Forecast,
   GameArt,
   HealId,
@@ -535,7 +536,7 @@ function spawnUnit(spawn: Mission["playerSpawns"][number], side: Unit["side"], i
           ? cultistSpellUses(level).magicMissile
           : cls.id === "brigand"
             ? brigandSpellUses(level).longShot
-            : cls.id === "birolho"
+            : cls.id === "birolho" || cls.id === "birolho2"
               ? birolhoSpellUses(level).magicMissile
               : remainingTier(cls.id, 1, "tier1", level, side, roster, spawn.name),
       tier2:
@@ -543,12 +544,12 @@ function spawnUnit(spawn: Mission["playerSpawns"][number], side: Unit["side"], i
           ? cultistSpellUses(level).lightning
           : cls.id === "brigand"
             ? brigandSpellUses(level).piercing
-            : cls.id === "birolho"
+            : cls.id === "birolho" || cls.id === "birolho2"
               ? birolhoSpellUses(level).lightning
               : remainingTier(cls.id, 2, "tier2", level, side, roster, spawn.name),
       tier3: remainingTier(cls.id, 3, "tier3", level, side, roster, spawn.name),
       tier4:
-        cls.id === "birolho"
+        cls.id === "birolho" || cls.id === "birolho2"
           ? birolhoSpellUses(level).causticVenom
           : remainingTier(cls.id, 4, "tier4", level, side, roster, spawn.name),
       tier5: remainingTier(cls.id, 5, "tier5", level, side, roster, spawn.name),
@@ -580,6 +581,7 @@ function spawnUnit(spawn: Mission["playerSpawns"][number], side: Unit["side"], i
     asleep: false,
     sleepTurns: 0,
     guaranteedDrop: side === "enemy" && !!spawn.guaranteedDrop,
+    dialog: spawn.dialog ?? null,
     moveBudgetUsed: 0,
   };
 }
@@ -642,6 +644,7 @@ function unitFromSnap(snap: BattleUnitSnap): Unit {
     asleep: snap.asleep,
     sleepTurns: snap.sleepTurns,
     guaranteedDrop: snap.guaranteedDrop,
+    dialog: snap.dialog,
     moveBudgetUsed: snap.moveBudgetUsed,
   };
 }
@@ -653,8 +656,11 @@ function takesTurns(u: Unit): boolean {
 }
 
 /** Whether the player may swing at this unit. Enemies always; wild neutrals too — that is
- * how a beast gets provoked in the first place. */
+ * how a beast gets provoked in the first place. A neutral carrying a dialog tree is an NPC,
+ * not a beast — never an attack target, clicking it opens the conversation instead (see
+ * BattleEngine.handleCell). */
 function attackableByPlayer(u: Unit): boolean {
+  if (u.dialog) return false;
   return u.alive && (u.side === "enemy" || u.side === "neutral");
 }
 
@@ -805,6 +811,10 @@ export class BattleEngine {
   /** See HudSnapshot.chestLoot — set the instant a chest opens, cleared only by
    * acknowledgeChestLoot() (the player's "Ok" on the popup), not by anything time-based. */
   private chestLoot: { unitName: string; ember: number; items: { name: string; icon: string; tip?: string }[] } | null = null;
+  /** See HudSnapshot.pendingDialog — set the instant a dialog-bearing NPC is clicked,
+   * cleared only by acknowledgeDialog() (the player closing the popup), same convention as
+   * chestLoot above. */
+  private pendingDialog: DialogTree | null = null;
   tip: string | null;
   private lastTipSeen: string | null = null;
   private tipSetAt = 0;
@@ -1049,12 +1059,25 @@ export class BattleEngine {
       })(),
       log: this.log,
       chestLoot: this.chestLoot,
+      pendingDialog: this.pendingDialog,
     };
   }
 
   /** The player's "Ok" on the chest loot popup — see HudSnapshot.chestLoot. */
   acknowledgeChestLoot(): void {
     this.chestLoot = null;
+  }
+
+  /** Opens an NPC's conversation — see handleCell's dialog branch. Always starts fresh from
+   * the tree's own startId; NPC dialog replays in full every time, no "already talked to"
+   * state kept. */
+  private openDialog(tree: DialogTree): void {
+    this.pendingDialog = tree;
+  }
+
+  /** The player closing the dialog popup — see HudSnapshot.pendingDialog. */
+  acknowledgeDialog(): void {
+    this.pendingDialog = null;
   }
 
   battlePlayerHp(): Record<string, number> {
@@ -1181,6 +1204,7 @@ export class BattleEngine {
         asleep: u.asleep,
         sleepTurns: u.sleepTurns,
         guaranteedDrop: u.guaranteedDrop,
+        dialog: u.dialog,
         moveBudgetUsed: u.moveBudgetUsed,
       };
       return snap;
@@ -1224,6 +1248,7 @@ export class BattleEngine {
       chestLoot: this.chestLoot
         ? { unitName: this.chestLoot.unitName, ember: this.chestLoot.ember, items: this.chestLoot.items.map((i) => ({ ...i })) }
         : null,
+      pendingDialog: this.pendingDialog,
       turnRestrained: this.turnRestrained,
       turnBegan: !!this.activeTurnUnit() && this.activeUnitId === this.activeTurnUnit()?.id,
       explored: this.snapshotExplored(),
@@ -1262,6 +1287,7 @@ export class BattleEngine {
     this.chestLoot = snap.chestLoot
       ? { unitName: snap.chestLoot.unitName, ember: snap.chestLoot.ember, items: snap.chestLoot.items.map((i) => ({ ...i })) }
       : null;
+    this.pendingDialog = snap.pendingDialog;
     this.turnRestrained = snap.turnRestrained;
     this.result = null;
     this.queue.length = 0;
@@ -1652,56 +1678,66 @@ export class BattleEngine {
           a.stage === "hit" && a.customDice
             ? rollDamageCustom(actor, target, attTile, defTile, a.customDice.dice, a.customDice.faces, a.customDice.bonus, this.rng)
             : rollDamage(actor, target, attTile, defTile, this.rng);
-        if (a.stage === "hit" && a.bonusDice > 0) {
-          hit.dmg += rollDice(a.bonusDiceCount, a.bonusDice, a.bonusFlat, this.rng);
-        }
-        if (a.stage === "hit" && a.dmgMul !== 1) {
-          hit.dmg = Math.max(1, Math.floor(hit.dmg * a.dmgMul));
-        }
-        if (a.stage === "hit" && a.stunChance > 0 && this.rng() < a.stunChance) {
-          target.stunned = true;
-          target.stunTurns = 1;
-          sfxPlay.stun();
-        }
-        if (target.asleep) {
-          hit.dmg = Math.max(1, Math.round(hit.dmg * (1 + WEB_OF_DREAMS.sleepBonusDamage)));
-          target.asleep = false;
-          target.sleepTurns = 0;
-        }
-        hit.dmg = Math.max(1, Math.round(hit.dmg * this.zoneDamageMul(target)));
-        target.hp = Math.max(0, target.hp - hit.dmg);
-        target.flash = 1;
-        this.provoke(target, actor);
-        // Only the original attacker's own strike earns XP — a successful counter deals
-        // damage but grants none, or a unit that gets ganged up on levels for free just by
-        // standing there and countering every hit.
-        if (target.side !== actor.side && a.stage === "hit") {
-          this.gainExp(actor, target.level, hit.dmg, 1);
-        }
-        this.spawnHit(target, hit.dmg, hit.crit, !this.isArrowAttack(actor) && !this.isArcaneCaster(actor));
-        this.pushLog(`${actor.name} atacou ${target.name}: ${hit.dmg} dano${hit.crit ? " (crítico)" : ""}`);
-        if (target.hp <= 0) {
-          this.markDead(target);
+        if (!hit.landed) {
+          this.spawnMiss(target);
+          this.pushLog(`${actor.name} atacou ${target.name}: Missed`);
+          sfxPlay.miss();
         } else {
-          sfxPlay.hit();
-          if (a.stage === "hit") this.maybeInflictDisease(actor, target);
-          if (a.stage === "hit" && a.spellKind === "trip") {
+          if (a.stage === "hit" && a.bonusDice > 0) {
+            hit.dmg += rollDice(a.bonusDiceCount, a.bonusDice, a.bonusFlat, this.rng);
+          }
+          if (a.stage === "hit" && a.dmgMul !== 1) {
+            hit.dmg = Math.max(1, Math.floor(hit.dmg * a.dmgMul));
+          }
+          if (a.stage === "hit" && a.stunChance > 0 && this.rng() < a.stunChance) {
             target.stunned = true;
-            target.stunTurns = TRIP.stunRounds;
-            if (!target.crippled) {
-              target.crippled = true;
-              const keep = 1 - TRIP.statPenalty;
-              target.atk = Math.round(target.atk * keep);
-              target.mag = Math.round(target.mag * keep);
-              target.def = Math.round(target.def * keep);
-              target.res = Math.round(target.res * keep);
-              target.mov = Math.max(1, Math.round(target.mov * keep));
+            target.stunTurns = 1;
+            sfxPlay.stun();
+          }
+          if (target.asleep) {
+            hit.dmg = Math.max(1, Math.round(hit.dmg * (1 + WEB_OF_DREAMS.sleepBonusDamage)));
+            target.asleep = false;
+            target.sleepTurns = 0;
+          }
+          hit.dmg = Math.max(1, Math.round(hit.dmg * this.zoneDamageMul(target)));
+          target.hp = Math.max(0, target.hp - hit.dmg);
+          target.flash = 1;
+          this.provoke(target, actor);
+          if (target.side !== actor.side) {
+            if (a.stage === "hit") {
+              this.gainExp(actor, target.level, hit.dmg, 1, target.hp <= 0);
+            } else {
+              // A counter deals its full real damage but only ever earns a flat 1 XP — see
+              // gainCounterExp — so a unit can't out-level by baiting hits and countering
+              // instead of attacking.
+              this.gainCounterExp(actor);
             }
-            sfxPlay.trip();
+          }
+          this.spawnHit(target, hit.dmg, hit.crit, !this.isArrowAttack(actor) && !this.isArcaneCaster(actor));
+          this.pushLog(`${actor.name} atacou ${target.name}: ${hit.dmg} dano${hit.crit ? " (crítico)" : ""}`);
+          if (target.hp <= 0) {
+            this.markDead(target);
+          } else {
+            sfxPlay.hit();
+            if (a.stage === "hit") this.maybeInflictDisease(actor, target);
+            if (a.stage === "hit" && a.spellKind === "trip") {
+              target.stunned = true;
+              target.stunTurns = TRIP.stunRounds;
+              if (!target.crippled) {
+                target.crippled = true;
+                const keep = 1 - TRIP.statPenalty;
+                target.atk = Math.round(target.atk * keep);
+                target.mag = Math.round(target.mag * keep);
+                target.def = Math.round(target.def * keep);
+                target.res = Math.round(target.res * keep);
+                target.mov = Math.max(1, Math.round(target.mov * keep));
+              }
+              sfxPlay.trip();
+            }
           }
         }
-        if (!this.reducedMotion) this.trauma = Math.min(1, this.trauma + 0.28);
-        this.hitstop = 0.06;
+        if (!this.reducedMotion) this.trauma = Math.min(1, this.trauma + (hit.landed ? 0.28 : 0.08));
+        this.hitstop = hit.landed ? 0.06 : 0;
       }
       if (a.t >= (this.isArrowAttack(actor) ? ARROW_TRAVEL + 0.18 : this.isArcaneCaster(actor) ? MISSILE_TRAVEL + 0.18 : 0.18)) {
         a.t = 0;
@@ -1797,6 +1833,7 @@ export class BattleEngine {
         }
         let dmg: number;
         let crit = false;
+        let landed = true;
         if (a.centerId && foe.id === a.centerId) {
           dmg = this.spellDamage(att, foe, a.centerMul, rollDice(a.centerDice, a.centerFaces, a.centerBonus, this.rng));
         } else if (a.extraDice > 0) {
@@ -1813,9 +1850,12 @@ export class BattleEngine {
             tileAt(this.tiles, this.cols, foe.x, foe.y),
             this.rng,
           );
+          landed = hit.landed;
           dmg = thrustHitIndex === 0 ? hit.dmg : Math.max(1, Math.floor(hit.dmg * 0.5));
           crit = hit.crit;
-          thrustHitIndex++;
+          // A miss doesn't count as a body the thrust passed through — only a landed hit
+          // advances the front-to-back falloff.
+          if (landed) thrustHitIndex++;
         } else {
           const hit = rollDamage(
             att,
@@ -1824,9 +1864,16 @@ export class BattleEngine {
             tileAt(this.tiles, this.cols, foe.x, foe.y),
             this.rng,
           );
+          landed = hit.landed;
           dmg = hit.dmg;
           crit = hit.crit;
-          if (a.weaponBonusDice > 0) dmg += rollDice(a.weaponBonusDice, a.weaponBonusFaces, a.weaponBonusBonus, this.rng);
+          if (a.weaponBonusDice > 0 && landed) dmg += rollDice(a.weaponBonusDice, a.weaponBonusFaces, a.weaponBonusBonus, this.rng);
+        }
+        if (!landed) {
+          this.spawnMiss(foe);
+          this.pushLog(`${att.name} atacou ${foe.name}: Missed`);
+          sfxPlay.miss();
+          continue;
         }
         if (a.dmgMul > 1) dmg = Math.max(1, dmg * a.dmgMul);
         if (a.spellKind === "cleave" && cleaveDoublesVs(foe)) dmg = Math.max(1, dmg * CLEAVE.largeMul);
@@ -1866,7 +1913,10 @@ export class BattleEngine {
                 ? 0.5
                 : 1;
           if (isAoeSpell) firstAoeEnemyHit = false;
-          this.gainExp(att, foe.level, dmg, xpMul);
+          // The universal finishing-blow bonus stacks multiplicatively on top of xpMul —
+          // it doesn't replace the mage/conjurer/Long Shot kill bonus above or the AoE
+          // per-target share, it applies in addition to whichever of those already fired.
+          this.gainExp(att, foe.level, dmg, xpMul, foe.hp <= 0);
         }
         const meleeSkill = a.spellKind === "doubleStrike" || a.spellKind === "cleave" || a.spellKind === "piercingThrust" || a.spellKind === "sweep" || a.spellKind === "trip" || a.spellKind === "shoulderSmash" || a.spellKind === "stampede";
         this.spawnHit(foe, dmg, crit, meleeSkill);
@@ -2027,10 +2077,30 @@ export class BattleEngine {
     }
   }
 
-  private gainExp(attacker: Unit, targetLevel: number, amount: number, multiplier = 1): void {
+  /** Finishing off a target pays 25% more XP than just wounding it — stacks multiplicatively
+   * with whatever skill-specific multiplier (mage/conjurer/Long Shot's own kill bonus, the
+   * AoE first-target-only full share, etc.) the caller already worked out, rather than
+   * replacing it. */
+  private static readonly KILL_EXP_BONUS_MUL = 1.25;
+
+  private gainExp(attacker: Unit, targetLevel: number, amount: number, multiplier = 1, isKill = false): void {
     if (amount <= 0 || attacker.side !== "player" || !attacker.alive) return;
     if (attacker.level >= MAX_LEVEL) return;
-    const gained = Math.round(expForHit(attacker.level, targetLevel) * multiplier);
+    const killMul = isKill ? BattleEngine.KILL_EXP_BONUS_MUL : 1;
+    const gained = Math.round(expForHit(attacker.level, targetLevel) * multiplier * killMul);
+    this.addExp(attacker, gained);
+  }
+
+  /** A successful counter always earns exactly 1 XP — flat, no level-gap scaling, no kill
+   * bonus, no stacking with anything. The counter still deals its full real damage; this
+   * only caps what it's worth in experience, so a unit can't out-level by baiting hits and
+   * countering instead of attacking. */
+  private gainCounterExp(attacker: Unit): void {
+    if (attacker.side !== "player" || !attacker.alive || attacker.level >= MAX_LEVEL) return;
+    this.addExp(attacker, 1);
+  }
+
+  private addExp(attacker: Unit, gained: number): void {
     if (gained <= 0) return;
     attacker.xp += gained;
     while (attacker.xp >= EXP_TO_LEVEL && attacker.level < MAX_LEVEL) {
@@ -2516,7 +2586,7 @@ export class BattleEngine {
   /** True only for bow/crossbow users. Reach weapons strike physically instead of firing arrows. */
   private isArrowAttack(unit: Unit): boolean {
     // Reach weapons are always physical, even if an imported loadout is incorrectly flagged ranged.
-    if (unit.classId === "pikeman" || unit.classId === "lancer" || unit.classId === "sandoval" || unit.classId === "sentinel" || unit.classId === "templar") return false;
+    if (unit.classId === "pikeman" || unit.classId === "lancer" || unit.classId === "aldric" || unit.classId === "sandoval" || unit.classId === "sentinel" || unit.classId === "templar") return false;
     if (unit.weaponId) return !!WEAPONS[unit.weaponId]?.ranged;
     // Default campaign loadouts: Neera and brigands start as bow/crossbow users before gear is assigned.
     return unit.classId === "archer" || unit.classId === "ranger" || unit.classId === "assassin" || unit.classId === "brigand";
@@ -2524,7 +2594,7 @@ export class BattleEngine {
 
   /** Only spellcasting classes use the distinct basic-attack arcane bolt. */
   private isArcaneCaster(unit: Unit): boolean {
-    return unit.classId === "mage" || unit.classId === "elementalist" || unit.classId === "warlock" || unit.classId === "cultist" || unit.classId === "birolho";
+    return unit.classId === "mage" || unit.classId === "elementalist" || unit.classId === "warlock" || unit.classId === "cultist" || unit.classId === "birolho" || unit.classId === "birolho2";
   }
 
   /** One glowing bolt per target, hex-to-hex — see MissileFx. */
@@ -2598,6 +2668,23 @@ export class BattleEngine {
     } else {
       emitOne(0.34, 9, 2, 1, 200 + this.rng() * 20);
     }
+  }
+
+  /** A whiffed attack: just the floating "Missed" text, no impact flash or hit particles. */
+  private spawnMiss(target: Unit): void {
+    this.emitParticle({
+      x: target.drawX,
+      y: target.drawY - 0.35,
+      vx: 0,
+      vy: -0.18,
+      life: 0,
+      max: 2,
+      size: 1,
+      color: "#c9c4bb",
+      text: "Missed",
+      kind: "text",
+      frame: 0,
+    });
   }
 
   private spawnHit(target: Unit, dmg: number, crit: boolean, physicalImpact = false): void {
@@ -2811,20 +2898,43 @@ export class BattleEngine {
     this.mode = "idle";
   }
 
+  /** Backs a cancelled skill/attack/off-hand choice out to the same "selected" state the
+   * unit was already in — reach and attackable targets recomputed fresh — instead of the
+   * old half-cleared "awaitAction" mode, which never recomputed reach and left the
+   * movement highlight gone until the unit was fully deselected and reselected. */
+  private returnToSelected(u: Unit): void {
+    this.selectedId = u.id;
+    this.pendingFoeId = null;
+    this.mode = "selected";
+    this.reach = computeReachable(this.effectiveUnitForReach(u), this.tiles, this.cols, this.rows, this.units, true, this.decorOverlay);
+    this.attackFrom = u.acted ? new Map() : this.visibleAttackTargets(u);
+  }
+
   cancel(): void {
+    const u = this.units.find((x) => x.id === this.selectedId);
     if (this.mode === "awaitSpell") {
-      this.mode = "awaitAction";
       this.spellArmed = false;
       this.spellAim = null;
       this.spellKind = null;
-    this.missileTargets = [];
+      this.missileTargets = [];
       this.tip = null;
+      if (u) this.returnToSelected(u);
+      else this.deselect();
+      sfxPlay.ui();
       return;
     }
     if (this.mode === "awaitPotion") {
-      this.mode = "awaitAction";
       this.potionAim = null;
       this.tip = null;
+      if (u) this.returnToSelected(u);
+      else this.deselect();
+      sfxPlay.ui();
+      return;
+    }
+    if ((this.mode === "awaitAttack" || this.mode === "awaitOffHand") && u) {
+      this.tip = null;
+      this.returnToSelected(u);
+      sfxPlay.ui();
       return;
     }
     this.deselect();
@@ -4113,6 +4223,7 @@ export class BattleEngine {
       asleep: false,
       sleepTurns: 0,
       guaranteedDrop: false,
+      dialog: null,
       moveBudgetUsed: 0,
     };
     this.units.push(familiar);
@@ -4937,8 +5048,8 @@ export class BattleEngine {
       }
     }
 
-    // Birolho — Relâmpago outranks Caustic Venom outranks Choque outranks Magic Missile.
-    if (next.classId === "birolho" && (next.spells.tier1 > 0 || next.spells.tier2 > 0 || next.spells.tier4 > 0 || next.shockCharges > 0)) {
+    // Birolho (and Birolho2) — Relâmpago outranks Caustic Venom outranks Choque outranks Magic Missile.
+    if ((next.classId === "birolho" || next.classId === "birolho2") && (next.spells.tier1 > 0 || next.spells.tier2 > 0 || next.spells.tier4 > 0 || next.shockCharges > 0)) {
       if (next.spells.tier2 > 0) {
         let bestBolt: { foe: Unit; from: Point; score: number } | null = null;
         for (const cell of reach.values()) {
@@ -5065,6 +5176,7 @@ export class BattleEngine {
       next.shockCharges > 0 &&
       next.classId !== "cultist" &&
       next.classId !== "birolho" &&
+      next.classId !== "birolho2" &&
       this.tryAiShock(next, reach, walkReach, players)
     ) {
       return;
@@ -5268,6 +5380,10 @@ export class BattleEngine {
         this.deselect();
       }
       this.select(here);
+      return;
+    }
+    if (here?.dialog && here.alive) {
+      this.openDialog(here.dialog);
       return;
     }
     if (this.targetable(here)) {
@@ -5759,43 +5875,7 @@ export class BattleEngine {
       const facing = decorationFacing(p.id, p.rot ?? 0, (file) => this.decorArtReady(file));
       const art = facing.own ? (this.art.decorations[facing.file] ?? img) : img;
 
-      // At a Tall-Parapeito junction the newest visible module owns the shared picture
-      // area. The older drawing is clipped even through transparent pixels, leaving a
-      // single clean tower rather than a rear tower showing through it.
-      const tallIntersections: { left: number; top: number; right: number; bottom: number }[] = [];
-      if (def.repeatGroup === "bridge-parapet-tall" && (p.rot ?? 0) === 0) {
-        for (let otherIndex = 0; otherIndex < this.decorations.length; otherIndex++) {
-          if (otherIndex === decorationIndex) continue;
-          const other = this.decorations[otherIndex]!;
-          const otherDef = DECORATIONS[other.id];
-          const otherLayer = otherDef?.unitLayer ?? (otherDef?.foreground ? "front" : "ground");
-          const paintsOver = (layer === "behind" && otherLayer === "front") || (otherLayer === layer && otherIndex > decorationIndex);
-          if (!otherDef || !paintsOver || otherDef.repeatGroup !== def.repeatGroup || (other.rot ?? 0) !== 0) continue;
-          let otherCx = 0;
-          let otherCy = 0;
-          for (const cell of placedFootprint(other)) {
-            const point = this.hexCenter(other.x + cell.dx, other.y + cell.dy);
-            otherCx += point.cx;
-            otherCy += point.cy;
-          }
-          otherCx /= otherDef.footprint.length;
-          otherCy /= otherDef.footprint.length;
-          const left = Math.max(cx - w / 2, otherCx - w / 2);
-          const right = Math.min(cx + w / 2, otherCx + w / 2);
-          const top = Math.max(cy - h / 2 + dy, otherCy - h / 2 + dy);
-          const bottom = Math.min(cy + h / 2 + dy, otherCy + h / 2 + dy);
-          if (right > left && bottom > top) tallIntersections.push({ left, top, right, bottom });
-        }
-      }
-      if (tallIntersections.length) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(-tile * 40, -tile * 40, tile * 80, tile * 80);
-        for (const intersection of tallIntersections) {
-          ctx.rect(intersection.left, intersection.top, intersection.right - intersection.left, intersection.bottom - intersection.top);
-        }
-        ctx.clip("evenodd");
-      }      if (facing.step === 0) {
+      if (facing.step === 0) {
         ctx.drawImage(art, cx - w / 2, cy - h / 2 + dy, w, h);
       } else if (facing.own) {
         ctx.save();
@@ -5810,7 +5890,6 @@ export class BattleEngine {
         ctx.drawImage(art, -w / 2, -h / 2, w, h);
         ctx.restore();
       }
-      if (tallIntersections.length) ctx.restore();
     }
   }
 
@@ -5929,8 +6008,14 @@ export class BattleEngine {
   private attackPose(u: Unit): number | null {
     const a = this.active;
     if (!a) return null;
-    // Visual-only pacing: the Conjurer holds each authored pose 10% longer.
-    const animationT = a.t * (u.sprite === "conjurer" ? 0.9 : 1);
+    // Visual-only pacing: the Conjurer holds each authored pose 10% longer. Every stage
+    // duration below (cast lead-in and the lunge/hit/recover splits) has to scale by the
+    // same factor as animationT, or the frame index caps out at 90% of a stage's range
+    // and jumps to the next stage's start the instant the real timer crosses over — a
+    // visible skip, and a jump straight to a differently-cropped frame if the sheet's
+    // per-frame crop isn't perfectly uniform (the "size change" this was causing).
+    const pace = u.sprite === "conjurer" ? 0.9 : 1;
+    const animationT = a.t * pace;
     // A dedicated cast pose (currently just Birolho's cast-*.png), for a spell or heal only —
     // falls back to the melee attacks cut for every sprite without one, same as before this
     // existed. Checked first so a caster with both never mixes an index meant for one pool's
@@ -5958,6 +6043,14 @@ export class BattleEngine {
       const counter = a.stage.startsWith("counter");
       const actor = counter ? a.def : a.att;
       if (u.id !== actor) return null;
+      // stepCombat's real per-stage clocks (see lunge/impactAt/recover there): 0.2s lunge,
+      // 0.18s hit, 0.16s recover, same for every sprite. animationT runs at `pace` of real
+      // time, so the divisor has to run at that same pace — otherwise a stage ends in real
+      // time before animationT/divisor ever reaches 1, and the index jumps straight to the
+      // next stage's start instead of finishing this one's frames.
+      const lungeDur = 0.2 * pace;
+      const hitDur = 0.18 * pace;
+      const recoverDur = 0.16 * pace;
       if (long) {
         // Long authored sheets use the whole motion: half for the wind-up, then a quarter
         // for impact and a quarter for recovery. This keeps legacy 12-frame cuts identical
@@ -5966,9 +6059,9 @@ export class BattleEngine {
         const hitN = Math.max(2, Math.round(n * 0.25));
         const hitStart = lungeN;
         const recoverStart = Math.min(n - 1, hitStart + hitN);
-        if (a.stage === "lunge" || a.stage === "counterLunge") return Math.min(lungeN - 1, Math.floor((animationT / 0.2) * lungeN));
-        if (a.stage === "hit" || a.stage === "counterHit") return Math.min(recoverStart - 1, hitStart + Math.floor((animationT / 0.18) * hitN));
-        if (a.stage === "recover" || a.stage === "counterRecover") return Math.min(n - 1, recoverStart + Math.floor((animationT / 0.16) * (n - recoverStart)));
+        if (a.stage === "lunge" || a.stage === "counterLunge") return Math.min(lungeN - 1, Math.floor((animationT / lungeDur) * lungeN));
+        if (a.stage === "hit" || a.stage === "counterHit") return Math.min(recoverStart - 1, hitStart + Math.floor((animationT / hitDur) * hitN));
+        if (a.stage === "recover" || a.stage === "counterRecover") return Math.min(n - 1, recoverStart + Math.floor((animationT / recoverDur) * (n - recoverStart)));
         return n - 1;
       }
       // Short sets: the classic cut is one frame per stage (0-1 lunge, 2 hit, 3 recover).
@@ -5978,9 +6071,9 @@ export class BattleEngine {
       const hitEnd = Math.max(lungeEnd + 1, Math.round((n - 1) * 0.6));
       const span = (from: number, to: number, prog: number) =>
         Math.min(to, from + Math.floor(Math.max(0, Math.min(0.999, prog)) * (to - from + 1)));
-      if (a.stage === "lunge" || a.stage === "counterLunge") return span(0, lungeEnd, animationT / 0.2);
-      if (a.stage === "hit" || a.stage === "counterHit") return span(lungeEnd + 1, hitEnd, animationT / 0.18);
-      if (a.stage === "recover" || a.stage === "counterRecover") return span(hitEnd + 1, n - 1, animationT / 0.16);
+      if (a.stage === "lunge" || a.stage === "counterLunge") return span(0, lungeEnd, animationT / lungeDur);
+      if (a.stage === "hit" || a.stage === "counterHit") return span(lungeEnd + 1, hitEnd, animationT / hitDur);
+      if (a.stage === "recover" || a.stage === "counterRecover") return span(hitEnd + 1, n - 1, animationT / recoverDur);
       return n - 1;
     }
     return null;
@@ -6439,7 +6532,8 @@ export class BattleEngine {
       // cast, when the caster has one — attacks otherwise), so this has to mirror that same
       // choice or the index lands in the wrong array.
       const casting = this.active && (this.active.type === "spell" || this.active.type === "heal") && this.active.att === u.id;
-      const frames = atk != null ? (casting ? (this.art.casts[u.sprite] ?? atkPool) : atkPool) : walk ?? idle ?? this.art.sprites[u.sprite];
+      const castPool = faceRight ? this.art.casts[u.sprite] : (this.art.castsLeft[u.sprite] ?? this.art.casts[u.sprite]);
+      const frames = atk != null ? (casting ? (castPool ?? atkPool) : atkPool) : walk ?? idle ?? this.art.sprites[u.sprite];
       const n = frames?.length ?? 0;
       const fi = atk != null ? atk : walk ? this.walkFrame(u, n) : this.idleFrame(u, n || 4);
       const walkDirs = moving ? this.art.walkDirs[u.sprite] : undefined;
@@ -6453,12 +6547,15 @@ export class BattleEngine {
       const isBigCreatureFootprint = u.footprintOffsets === FOOTPRINT_TYPE_8 || u.footprintOffsets === FOOTPRINT_TYPE_7;
       // Keep these display adjustments tied to the unit class as well as the asset id.
       // This makes them survive saved scenarios that still carry an older sprite id.
-      const isLancer = u.classId === "lancer" || u.classId === "sandoval" || u.sprite === "lancer" || u.sprite === "sandoval";
+      // defaultLancer is still the same tightly-cropped silver-armor-and-spear cut as
+      // lancer under an older asset name, so it keeps the boost. Aldric moved to the
+      // Aldric Final art (same full-body-on-canvas crop convention as Kael Final), so it
+      // now renders at the same scale as every other human sprite instead of this boost.
+      // Sandoval is a distinct boss cut, not this same asset, so it gets its own scale.
+      const isLancer = u.classId === "lancer" || u.sprite === "lancer" || u.sprite === "defaultLancer";
+      const isSandoval = u.classId === "sandoval" || u.sprite === "sandoval";
       const isFamiliar = u.classId === "familiar" || u.sprite === "familiar";
-      // The preserved Lancer sheet is slightly tighter than the other humanoid cuts.
-      // Its feet remain anchored while the figure is 10% larger; the summoned Familiar
-      // intentionally occupies half the normal visual footprint.
-      const spriteScale = isLancer ? 1.1 : isFamiliar ? 0.5 : 1;
+      const spriteScale = isLancer ? 1.4 : isSandoval ? 1.2 : isFamiliar ? 0.5 : 1;
       const h = cell * (s >= 4 ? 3.35 : s === 2 ? 1.72 : boss ? 1.44 : 1.42) * 1.2 * (isBigCreatureFootprint ? 0.75 : 1) * spriteScale;
       const w = cell * (s >= 4 ? 2.85 : s === 2 ? 1.85 : boss ? 1.12 : 1.11) * 1.2 * (isBigCreatureFootprint ? 0.75 : 1) * spriteScale;
       // Big creatures plant their feet at the bottom corner of their front hex (tile * 0.9,
