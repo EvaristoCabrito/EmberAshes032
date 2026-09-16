@@ -1,6 +1,10 @@
 import { DECORATIONS, decorationImage } from "./data";
 import type { GameArt, SpriteId, TerrainId } from "./types";
 
+// Number of art variants available per terrain, e.g. plains001.png / plains002.png.
+// Index 0 (the "001" file) is what every mission renders with unless it names a
+// different variant in Mission.tileVariants — keep it as the tile that's safe
+// for existing maps.
 export const TILE_VARIANT_COUNT: Record<TerrainId, number> = {
   plains: 15,
   woods: 7,
@@ -18,12 +22,14 @@ export const TILE_VARIANT_COUNT: Record<TerrainId, number> = {
   door: 1,
   deadtree: 1,
   void: 1,
-  snow: 4,
-  shallowsnow: 4,
-  snowwoods: 6,
 };
 
+/** The art file a tile variant paints with, without path or cache-buster — "woods002".
+ * Two variants of the same terrain differ only in art, so this is the only way to tell
+ * from a painted map which of them a cell is actually using. */
 export function tileVariantName(id: TerrainId, variant: number): string {
+  // New ground materials are inserted ahead of the legacy plains without renaming
+  // their on-disk files, so saved maps keep their original art available.
   if (id === "plains") {
     if (variant === 0) return "plains016";
     if (variant === 1) return "plains015";
@@ -47,5 +53,5 @@ export function tileVariantName(id: TerrainId, variant: number): string {
 }
 
 export function tileVariantSrc(id: TerrainId, variant: number): string {
-  return `/game/tiles/${tileVariantName(id, variant)}.png?v=56`;
+  return `/game/tiles/${tileVariantName(id, variant)}.png?v=55`;
 }
